@@ -10,6 +10,8 @@ import { State } from "./types";
 import { createBolt } from "bolt-react-store";
 import { useZustandProvider, ZustandProvider } from "./zustand/store";
 
+export { StressTestRoute } from "./StressTest";
+
 const {
   Provider: BoltProvider,
   useSet: useBoltSet,
