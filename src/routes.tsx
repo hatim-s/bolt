@@ -7,7 +7,14 @@ import {
   type UseCounter,
 } from "./FruitCounter";
 import { State } from "./types";
+import { createBolt } from "bolt-react-store";
 import { useZustandProvider, ZustandProvider } from "./zustand/store";
+
+const {
+  Provider: BoltProvider,
+  useSet: useBoltSet,
+  useStore: useBoltStore,
+} = createBolt<State>();
 
 function ContextRenderCount() {
   const { state } = useProvider();
@@ -40,6 +47,22 @@ const useZustandCounter: UseCounter = (id: keyof State) => {
   return { count, increment };
 };
 
+function BoltRenderCount() {
+  const state = useBoltStore();
+  return <RenderCount state={state} />;
+}
+
+const useBoltCounter: UseCounter = (id: keyof State) => {
+  const count = useBoltStore(id);
+  const setState = useBoltSet();
+
+  const increment = useCallback(() => {
+    setState(id, (previous) => previous + 1);
+  }, [id, setState]);
+
+  return { count, increment };
+};
+
 export function ContextRoute() {
   return (
     <Provider state={INITIAL_STATE}>
@@ -59,5 +82,16 @@ export function ZustandRoute() {
         useCounter={useZustandCounter}
       />
     </ZustandProvider>
+  );
+}
+
+export function BoltRoute() {
+  return (
+    <BoltProvider state={INITIAL_STATE}>
+      <FruitCounter
+        renderCounter={<BoltRenderCount />}
+        useCounter={useBoltCounter}
+      />
+    </BoltProvider>
   );
 }
