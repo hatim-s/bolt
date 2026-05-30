@@ -1,5 +1,5 @@
 {
-  "name": "bolt-react-store",
+  "name": "bolt",
   "version": "0.1.0",
   "description": "Path-indexed external store for React.",
   "type": "module",

@@ -36,7 +36,7 @@ import {
 } from "./utils";
 
 // Re-export public types from the runtime entry so consumers can import both
-// values and types from "bolt-react-store".
+// values and types from "bolt".
 export type {
   BoltPath,
   BoltPathValue,

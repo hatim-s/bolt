@@ -7,7 +7,7 @@ import {
   type UseCounter,
 } from "./FruitCounter";
 import { State } from "./types";
-import { createBolt } from "bolt-react-store";
+import { createBolt } from "bolt";
 import { useZustandProvider, ZustandProvider } from "./zustand/store";
 
 export { StressTestRoute } from "./StressTest";

@@ -1,4 +1,4 @@
-# ⚡ bolt-react-store
+# ⚡ Bolt
 
 A small, fast state store for React that you talk to with **paths**, not
 selectors. ~4.3 kB gzip, no boilerplate, no providers-in-providers, and it only
@@ -17,8 +17,8 @@ changed. Writes are immutable under the hood — you just write the path.
 You can try the live comparison playground: `bun run dev` → open `/stresstest`.
 
 ```bash
-npm install bolt-react-store react
-# or: bun add bolt-react-store react
+npm install bolt react
+# or: bun add bolt react
 ```
 
 ## First, create a store
@@ -27,7 +27,7 @@ npm install bolt-react-store react
 state shape. No actions to declare, no reducers — `set` is generic.
 
 ```tsx
-import { createBolt } from "bolt-react-store";
+import { createBolt } from "bolt";
 
 type State = {
   user: { profile: { name: string } };

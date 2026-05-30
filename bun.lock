@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "bolt-react-store",
+      "name": "bolt",
       "dependencies": {
         "lodash": "^4.18.1",
         "mutative": "^1.3.0",
