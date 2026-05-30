@@ -14,7 +14,6 @@ export { StressTestRoute } from "./StressTest";
 
 const {
   Provider: BoltProvider,
-  useSet: useBoltSet,
   useStore: useBoltStore,
 } = createBolt<State>();
 
@@ -55,12 +54,11 @@ function BoltRenderCount() {
 }
 
 const useBoltCounter: UseCounter = (id: keyof State) => {
-  const count = useBoltStore(id);
-  const setState = useBoltSet();
+  const [count, setCount] = useBoltStore(id);
 
   const increment = useCallback(() => {
-    setState(id, (previous) => previous + 1);
-  }, [id, setState]);
+    setCount((previous) => previous + 1);
+  }, [setCount]);
 
   return { count, increment };
 };

@@ -5,8 +5,8 @@ selectors. ~4.3 kB gzip, no boilerplate, no providers-in-providers, and it only
 re-renders the components that actually care.
 
 ```tsx
-const name = useStore("user.profile.name"); // read one path
-set("user.profile.name", "Ada");            // write one path — no spreads
+const [name, setName] = useStore("user.profile.name"); // read and write one path
+setName("Ada");                                        // no spreads
 ```
 
 Don't disregard it because it's tiny. Bolt keeps state outside React and talks
@@ -44,15 +44,13 @@ Nothing else does.
 
 ```tsx
 function Counter() {
-  const count = useStore("count");
-  const set = useSet();
-  return <button onClick={() => set("count", (c) => c + 1)}>{count}</button>;
+  const [count, setCount] = useStore("count");
+  return <button onClick={() => setCount((c) => c + 1)}>{count}</button>;
 }
 
 function Name() {
-  const name = useStore("user.profile.name");
-  const set = useSet();
-  return <input value={name} onChange={(e) => set("user.profile.name", e.target.value)} />;
+  const [name, setName] = useStore("user.profile.name");
+  return <input value={name} onChange={(e) => setName(e.target.value)} />;
 }
 
 function App() {
@@ -91,9 +89,10 @@ Paths are **dot strings or arrays** — arrays are handy for dynamic keys. `set`
 takes a value or an updater function.
 
 ```ts
-useStore("items.0.name");
-useStore(["items", 0, "name"]);             // same subscription
+const [itemName, setItemName] = useStore("items.0.name");
+const [sameItemName] = useStore(["items", 0, "name"]); // same subscription
 
+setItemName("Pear");                        // bound setter from useStore(path)
 set("user.profile.name", "Ada");            // value
 set("count", (previous) => previous + 1);   // updater
 set(["cells", cellId], (n) => n + 1);       // dynamic key
@@ -109,7 +108,8 @@ Paths and `set` values are type-checked from your state, up to 6 levels deep.
 | Member | What it does |
 | --- | --- |
 | `Provider` | `({ state, children })` — owns one store. `state` is read once on mount. |
-| `useStore(path?)` | Subscribe to a path and return its value. No arg = whole store. |
+| `useStore(path)` | Subscribe to a path and return `[value, setValue]`. The setter is already bound to that path. |
+| `useStore()` | Subscribe to the whole store and return its value. |
 | `useSet()` | Returns the typed `set(path, valueOrUpdater)`. |
 | `useApi()` | Imperative `{ get, set, getState, subscribe }` — no re-render. |
 
@@ -138,12 +138,13 @@ The gap **widens with size**: Zustand re-runs every selector on every write
 ## How it works
 
 State lives in a closure outside React. Each `useStore(path)` registers a
-`useSyncExternalStore` subscription keyed by that path. When you write `a.b.c.d`,
-Bolt notifies the listeners for `a.b.c.d` **and its prefixes** — `a.b.c`, `a.b`,
-`a`, and the root — and nobody else. So a parent watching `a.b` updates when
-anything beneath it changes, while a sibling on `a.x` never hears about it.
-Nested writes go through [Mutative](https://github.com/unadlib/mutative), which
-gives you mutation-style writes while keeping state immutable.
+`useSyncExternalStore` subscription keyed by that path and returns a setter
+already bound to the same path. When you write `a.b.c.d`, Bolt notifies the
+listeners for `a.b.c.d` **and its prefixes** — `a.b.c`, `a.b`, `a`, and the root
+— and nobody else. So a parent watching `a.b` updates when anything beneath it
+changes, while a sibling on `a.x` never hears about it. Nested writes go through
+[Mutative](https://github.com/unadlib/mutative), which gives you mutation-style
+writes while keeping state immutable.
 
 ## When *not* to reach for bolt
 
