@@ -7,10 +7,17 @@ import {
   type UseCounter,
 } from "./FruitCounter";
 import { State } from "./types";
-import { createBolt } from "bolt";
+import { createBolt } from "@hatimcodes/bolt";
+import {
+  LegendProvider,
+  useLegendApi,
+  useLegendProvider,
+} from "./legend/store";
 import { useZustandProvider, ZustandProvider } from "./zustand/store";
 
 export { StressTestRoute } from "./StressTest";
+export { StressTest2Route } from "./StressTest2";
+export { StressTest3Route } from "./StressTest3";
 
 const {
   Provider: BoltProvider,
@@ -25,6 +32,11 @@ function ContextRenderCount() {
 
 function ZustandRenderCount() {
   const state = useZustandProvider((store) => store.state);
+  return <RenderCount state={state} />;
+}
+
+function LegendRenderCount() {
+  const state = useLegendProvider((store) => store.get());
   return <RenderCount state={state} />;
 }
 
@@ -45,6 +57,17 @@ const useZustandCounter: UseCounter = (id: keyof State) => {
   const increment = useCallback(() => {
     setState((prev) => ({ ...prev, [id]: prev[id] + 1 }));
   }, [id, setState]);
+
+  return { count, increment };
+};
+
+const useLegendCounter: UseCounter = (id: keyof State) => {
+  const store = useLegendApi();
+  const count = useLegendProvider((store) => store[id].get());
+
+  const increment = useCallback(() => {
+    store[id].set((previous) => previous + 1);
+  }, [id, store]);
 
   return { count, increment };
 };
@@ -84,6 +107,17 @@ export function ZustandRoute() {
         useCounter={useZustandCounter}
       />
     </ZustandProvider>
+  );
+}
+
+export function LegendRoute() {
+  return (
+    <LegendProvider state={INITIAL_STATE}>
+      <FruitCounter
+        renderCounter={<LegendRenderCount />}
+        useCounter={useLegendCounter}
+      />
+    </LegendProvider>
   );
 }
 

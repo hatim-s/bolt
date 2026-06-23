@@ -13,7 +13,6 @@ import {
   useRef,
   useSyncExternalStore,
 } from "react";
-import { create } from "mutative";
 import type {
   BoltPath,
   BoltPathValue,
@@ -32,11 +31,11 @@ import {
   readPath,
   resolveValue,
   splitPathKey,
-  writePath,
+  writeImmutablePath,
 } from "./utils";
 
 // Re-export public types from the runtime entry so consumers can import both
-// values and types from "bolt".
+// values and types from the package root.
 export type {
   BoltPath,
   BoltPathValue,
@@ -211,18 +210,15 @@ function createInternalBoltStore<TState extends object>(
     const segments = splitPathKey(pathKey);
     const previousState = state;
 
-    // Root updates replace the whole state. Nested updates go through Mutative
-    // so callers write mutation-style updates while Bolt keeps immutable state.
+    // Root updates replace the whole state. Nested updates clone only the root
+    // and changed path ancestors so path snapshots stay React-safe.
     if (segments.length === 0) {
       state = resolveValue(valueOrUpdater, state) as TState;
     } else {
-      state = create(state, (draft) => {
-        writePath(draft, segments, valueOrUpdater);
-      });
+      state = writeImmutablePath(state, segments, valueOrUpdater);
     }
 
-    // Mutative returns the original reference for no-op nested writes. If the
-    // root reference did not change, React has nothing new to read.
+    // If the root reference did not change, React has nothing new to read.
     if (state === previousState) {
       return;
     }
