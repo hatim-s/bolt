@@ -15,35 +15,59 @@ import {
 import { createBolt } from "@hatimcodes/bolt";
 import { observable, type Observable } from "@legendapp/state";
 import { useSelector } from "@legendapp/state/react";
-import { useStore } from "zustand";
-import { createStore, type StoreApi } from "zustand/vanilla";
 
-type StressState = {
+type MixedState = {
   cells: Record<string, number>;
+  revision: number;
 };
 
-type ZustandStressState = {
-  state: StressState;
-  reset: (state: StressState) => void;
-  setCell: (id: string, updater: (previous: number) => number) => void;
+type WorkloadStep =
+  | {
+      id: string;
+      kind: "leaf";
+      update: CellUpdate;
+    }
+  | {
+      id: string;
+      kind: "burst";
+      updates: CellUpdate[];
+    }
+  | {
+      id: string;
+      kind: "snapshot";
+      state: MixedState;
+      updateCount: number;
+    };
+
+type CellUpdate = {
+  id: string;
+  value: number;
 };
 
-type BenchmarkResult = {
+type WorkloadStats = {
+  burstSteps: number;
+  leafSteps: number;
+  snapshotSteps: number;
+  totalChangedValues: number;
+};
+
+type BenchmarkResult = WorkloadStats & {
   cellRenders: number;
   dispatchMs: number;
-  renderRatio: number;
+  steps: number;
   totalMs: number;
-  touchedCells: number;
-  updates: number;
   updatesPerMs: number;
 };
 
 type BenchmarkHandle = {
   reset: () => Promise<void>;
-  run: (sequence: readonly string[]) => Promise<BenchmarkResult>;
+  run: (
+    steps: readonly WorkloadStep[],
+    stats: WorkloadStats,
+  ) => Promise<BenchmarkResult>;
 };
 
-type EngineId = "zustand" | "legend" | "bolt";
+type EngineId = "legend" | "bolt";
 
 type CellProps = {
   id: string;
@@ -51,99 +75,124 @@ type CellProps = {
 };
 
 const CELL_OPTIONS = [128, 512, 1024, 2048] as const;
-const UPDATE_OPTIONS = [1_000, 5_000, 10_000, 25_000] as const;
+const STEP_OPTIONS = [250, 1000, 2500, 5000] as const;
 const DEFAULT_CELL_COUNT = 512;
-const DEFAULT_SEED = 11;
-const DEFAULT_UPDATE_COUNT = 10_000;
+const DEFAULT_SEED = 17;
+const DEFAULT_STEP_COUNT = 1000;
+const BURST_SIZE = 8;
+const SNAPSHOT_CHANGE_RATIO = 0.1;
 
-const zustandContext = createContext<StoreApi<ZustandStressState> | null>(null);
-const legendContext = createContext<Observable<StressState> | null>(null);
+const legendContext = createContext<Observable<MixedState> | null>(null);
 
 const {
-  Provider: BoltStressProvider,
-  useSet: useBoltStressSet,
-  useStore: useBoltStressStore,
-} = createBolt<StressState>();
+  Provider: BoltMixedProvider,
+  useSet: useBoltMixedSet,
+  useStore: useBoltMixedStore,
+} = createBolt<MixedState>();
 
-function createStressState(ids: readonly string[]): StressState {
+function createCellIds(count: number) {
+  return Array.from({ length: count }, (_, index) => `cell-${index}`);
+}
+
+function createInitialState(ids: readonly string[]): MixedState {
   const cells: Record<string, number> = {};
 
   for (const id of ids) {
     cells[id] = 0;
   }
 
-  return { cells };
+  return { cells, revision: 0 };
 }
 
-function createCellIds(count: number) {
-  return Array.from({ length: count }, (_, index) => `cell-${index}`);
+function nextRandom(value: number) {
+  return (value * 1_664_525 + 1_013_904_223) >>> 0;
 }
 
-function createMutationSequence(
+function createMixedWorkload(
   ids: readonly string[],
-  updateCount: number,
+  stepCount: number,
   seed: number,
 ) {
-  let value = seed || DEFAULT_SEED;
-  const sequence: string[] = [];
-
-  for (let index = 0; index < updateCount; index += 1) {
-    value = (value * 1_664_525 + 1_013_904_223) >>> 0;
-    sequence.push(ids[value % ids.length]);
-  }
-
-  return sequence;
-}
-
-function createZustandStressStore(initialState: StressState) {
-  return createStore<ZustandStressState>((set) => ({
-    state: initialState,
-    reset: (state) => set({ state }),
-    setCell: (id, updater) => {
-      set(({ state }) => ({
-        state: {
-          cells: {
-            ...state.cells,
-            [id]: updater(state.cells[id] ?? 0),
-          },
-        },
-      }));
-    },
-  }));
-}
-
-function ZustandStressProvider({
-  children,
-  state,
-}: PropsWithChildren<{ state: StressState }>) {
-  const storeRef = useRef<StoreApi<ZustandStressState>>(undefined);
-
-  if (!storeRef.current) {
-    storeRef.current = createZustandStressStore(state);
-  }
-
-  return createElement(
-    zustandContext.Provider,
-    { value: storeRef.current },
-    children,
+  let random = seed || DEFAULT_SEED;
+  let state = createInitialState(ids);
+  const steps: WorkloadStep[] = [];
+  const stats: WorkloadStats = {
+    burstSteps: 0,
+    leafSteps: 0,
+    snapshotSteps: 0,
+    totalChangedValues: 0,
+  };
+  const snapshotChangeCount = Math.max(
+    1,
+    Math.round(ids.length * SNAPSHOT_CHANGE_RATIO),
   );
-}
 
-function useZustandStress<T>(selector: (state: ZustandStressState) => T) {
-  const store = useContext(zustandContext);
+  for (let index = 0; index < stepCount; index += 1) {
+    random = nextRandom(random);
+    const roll = random % 100;
 
-  if (!store) {
-    throw new Error("useZustandStress must be used inside ZustandStressProvider");
+    if (roll < 70) {
+      random = nextRandom(random);
+      const id = ids[random % ids.length];
+      const value = state.cells[id] + 1;
+      state = {
+        cells: { ...state.cells, [id]: value },
+        revision: state.revision + 1,
+      };
+      steps.push({ id: `leaf-${index}`, kind: "leaf", update: { id, value } });
+      stats.leafSteps += 1;
+      stats.totalChangedValues += 1;
+      continue;
+    }
+
+    if (roll < 95) {
+      random = nextRandom(random);
+      const start = random % ids.length;
+      const updates: CellUpdate[] = [];
+      const cells = { ...state.cells };
+
+      for (let offset = 0; offset < BURST_SIZE; offset += 1) {
+        const id = ids[(start + offset) % ids.length];
+        const value = cells[id] + 1;
+        cells[id] = value;
+        updates.push({ id, value });
+      }
+
+      state = { cells, revision: state.revision + 1 };
+      steps.push({ id: `burst-${index}`, kind: "burst", updates });
+      stats.burstSteps += 1;
+      stats.totalChangedValues += updates.length;
+      continue;
+    }
+
+    random = nextRandom(random);
+    const start = random % ids.length;
+    const cells = { ...state.cells };
+
+    for (let offset = 0; offset < snapshotChangeCount; offset += 1) {
+      const id = ids[(start + offset) % ids.length];
+      cells[id] += 1;
+    }
+
+    state = { cells, revision: state.revision + 1 };
+    steps.push({
+      id: `snapshot-${index}`,
+      kind: "snapshot",
+      state,
+      updateCount: snapshotChangeCount,
+    });
+    stats.snapshotSteps += 1;
+    stats.totalChangedValues += snapshotChangeCount;
   }
 
-  return useStore(store, selector);
+  return { stats, steps };
 }
 
-function LegendStressProvider({
+function LegendMixedProvider({
   children,
   state,
-}: PropsWithChildren<{ state: StressState }>) {
-  const storeRef = useRef<Observable<StressState>>(undefined);
+}: PropsWithChildren<{ state: MixedState }>) {
+  const storeRef = useRef<Observable<MixedState>>(undefined);
 
   if (!storeRef.current) {
     storeRef.current = observable(state);
@@ -156,11 +205,11 @@ function LegendStressProvider({
   );
 }
 
-function useLegendStress<T>(selector: (state: Observable<StressState>) => T) {
+function useLegendMixed<T>(selector: (state: Observable<MixedState>) => T) {
   const store = useContext(legendContext);
 
   if (!store) {
-    throw new Error("useLegendStress must be used inside LegendStressProvider");
+    throw new Error("useLegendMixed must be used inside LegendMixedProvider");
   }
 
   return useSelector(() => selector(store));
@@ -175,21 +224,20 @@ function waitForPaint() {
 }
 
 function buildResult(
-  sequence: readonly string[],
+  steps: readonly WorkloadStep[],
+  stats: WorkloadStats,
   dispatchMs: number,
   totalMs: number,
   cellRenders: number,
 ): BenchmarkResult {
-  const updates = sequence.length;
-
   return {
+    ...stats,
     cellRenders,
     dispatchMs,
-    renderRatio: updates === 0 ? 0 : cellRenders / updates,
+    steps: steps.length,
     totalMs,
-    touchedCells: new Set(sequence).size,
-    updates,
-    updatesPerMs: dispatchMs === 0 ? 0 : updates / dispatchMs,
+    updatesPerMs:
+      dispatchMs === 0 ? 0 : stats.totalChangedValues / dispatchMs,
   };
 }
 
@@ -219,26 +267,25 @@ function resultSummary(
   return `${winner} lower total-to-paint by ${delta.toFixed(1)}% (${ratio.toFixed(2)}x)`;
 }
 
-export function StressTestRoute() {
+export function StressTest3Route() {
   const [cellCount, setCellCount] = useState<number>(DEFAULT_CELL_COUNT);
-  const [updateCount, setUpdateCount] = useState<number>(DEFAULT_UPDATE_COUNT);
+  const [stepCount, setStepCount] = useState<number>(DEFAULT_STEP_COUNT);
   const [seed, setSeed] = useState<number>(DEFAULT_SEED);
   const [isRunning, setIsRunning] = useState(false);
   const [summary, setSummary] = useState("No benchmark run yet");
   const ids = useMemo(() => createCellIds(cellCount), [cellCount]);
-  const initialState = useMemo(() => createStressState(ids), [ids]);
-  const zustandRef = useRef<BenchmarkHandle>(null);
-  const boltRef = useRef<BenchmarkHandle>(null);
+  const initialState = useMemo(() => createInitialState(ids), [ids]);
+  const workload = useMemo(
+    () => createMixedWorkload(ids, stepCount, seed),
+    [ids, seed, stepCount],
+  );
   const legendRef = useRef<BenchmarkHandle>(null);
+  const boltRef = useRef<BenchmarkHandle>(null);
   const runCountRef = useRef(0);
 
   const resetPanels = useCallback(async () => {
     setIsRunning(true);
-    await Promise.all([
-      zustandRef.current?.reset(),
-      boltRef.current?.reset(),
-      legendRef.current?.reset(),
-    ]);
+    await Promise.all([legendRef.current?.reset(), boltRef.current?.reset()]);
     setSummary("Stores reset");
     setIsRunning(false);
   }, []);
@@ -246,70 +293,68 @@ export function StressTestRoute() {
   const runBenchmark = useCallback(async () => {
     const boltHandle = boltRef.current;
     const legendHandle = legendRef.current;
-    const zustandHandle = zustandRef.current;
 
-    if (!boltHandle || !legendHandle || !zustandHandle || isRunning) {
+    if (!boltHandle || !legendHandle || isRunning) {
       return;
     }
 
     const handles: Record<EngineId, BenchmarkHandle> = {
       bolt: boltHandle,
       legend: legendHandle,
-      zustand: zustandHandle,
     };
-
-    setIsRunning(true);
-
-    const sequence = createMutationSequence(ids, updateCount, seed);
     const order: EngineId[] =
-      runCountRef.current % 2 === 0
-        ? ["zustand", "legend", "bolt"]
-        : ["bolt", "legend", "zustand"];
-    runCountRef.current += 1;
+      runCountRef.current % 2 === 0 ? ["legend", "bolt"] : ["bolt", "legend"];
+    const results = {} as Record<EngineId, BenchmarkResult>;
 
-    await Promise.all([
-      handles.zustand.reset(),
-      handles.legend.reset(),
-      handles.bolt.reset(),
-    ]);
+    runCountRef.current += 1;
+    setIsRunning(true);
+    await Promise.all([handles.legend.reset(), handles.bolt.reset()]);
     await waitForPaint();
     setSummary(`Running ${order.join(" then ")}`);
 
-    const results = {} as Record<EngineId, BenchmarkResult>;
-
     for (const engine of order) {
       setSummary(`Running ${engine}`);
-      results[engine] = await handles[engine].run(sequence);
+      results[engine] = await handles[engine].run(
+        workload.steps,
+        workload.stats,
+      );
       await waitForPaint();
     }
 
     setSummary(resultSummary(results.bolt, results.legend));
     setIsRunning(false);
-  }, [ids, isRunning, seed, updateCount]);
+  }, [isRunning, workload]);
 
   return (
     <main className="min-h-dvh bg-paper px-5 py-7 text-ink sm:px-8 lg:px-10">
-      <div className="mx-auto flex max-w-7xl flex-col gap-6">
+      <div className="mx-auto flex max-w-6xl flex-col gap-6">
         <header className="flex flex-col gap-5 border-b border-ink/10 pb-6 lg:flex-row lg:items-end lg:justify-between">
           <div className="flex max-w-2xl flex-col gap-2">
             <span className="font-mono text-[0.65rem] uppercase tracking-[0.22em] text-ink-faint">
-              React · Store stress test
+              React · Mixed workload test
             </span>
             <h1 className="font-serif text-3xl font-medium leading-none text-ink sm:text-4xl">
-              Zustand vs Legend State vs Bolt
+              Real-world blend
             </h1>
             <p className="max-w-xl text-sm leading-6 text-ink-soft">
-              Same mounted grid, same deterministic mutation sequence, same
-              leaf-level subscriptions.
+              70% single-cell writes, 25% burst patches, 5% partial snapshots.
             </p>
           </div>
 
-          <a
-            href="/"
-            className="w-fit rounded-md border border-ink/15 px-3 py-2 font-mono text-[0.65rem] uppercase tracking-[0.18em] text-ink-soft transition hover:border-ink/40 hover:text-ink"
-          >
-            Fruit counter
-          </a>
+          <div className="flex flex-wrap gap-2">
+            <a
+              href="/stress-test"
+              className="w-fit rounded-md border border-ink/15 px-3 py-2 font-mono text-[0.65rem] uppercase tracking-[0.18em] text-ink-soft transition hover:border-ink/40 hover:text-ink"
+            >
+              Leaf writes
+            </a>
+            <a
+              href="/stress-test-2"
+              className="w-fit rounded-md border border-ink/15 px-3 py-2 font-mono text-[0.65rem] uppercase tracking-[0.18em] text-ink-soft transition hover:border-ink/40 hover:text-ink"
+            >
+              Snapshots
+            </a>
+          </div>
         </header>
 
         <section className="grid gap-3 rounded-lg border border-ink/10 bg-card p-3 sm:grid-cols-[repeat(4,minmax(0,1fr))]">
@@ -333,15 +378,15 @@ export function StressTestRoute() {
 
           <label className="flex flex-col gap-1">
             <span className="font-mono text-[0.6rem] uppercase tracking-[0.18em] text-ink-faint">
-              Updates
+              Steps
             </span>
             <select
               className="h-10 rounded-md border border-ink/10 bg-white px-3 font-mono text-sm text-ink"
               disabled={isRunning}
-              onChange={(event) => setUpdateCount(Number(event.target.value))}
-              value={updateCount}
+              onChange={(event) => setStepCount(Number(event.target.value))}
+              value={stepCount}
             >
-              {UPDATE_OPTIONS.map((option) => (
+              {STEP_OPTIONS.map((option) => (
                 <option key={option} value={option}>
                   {formatNumber(option)}
                 </option>
@@ -384,94 +429,27 @@ export function StressTestRoute() {
         </section>
 
         <div className="rounded-md border border-ink/10 bg-white px-3 py-2 font-mono text-xs text-ink-soft">
-          {summary}
+          {summary} · Leaf {formatNumber(workload.stats.leafSteps)} · Burst{" "}
+          {formatNumber(workload.stats.burstSteps)} · Snapshot{" "}
+          {formatNumber(workload.stats.snapshotSteps)}
         </div>
 
         <section
-          className="grid gap-4 xl:grid-cols-3"
-          key={`${cellCount}-${seed}`}
+          className="grid gap-4 lg:grid-cols-2"
+          key={`${cellCount}-${stepCount}-${seed}`}
         >
-          <ZustandStressProvider state={initialState}>
-            <ZustandBenchmarkPanel ids={ids} ref={zustandRef} />
-          </ZustandStressProvider>
-
-          <LegendStressProvider state={initialState}>
+          <LegendMixedProvider state={initialState}>
             <LegendBenchmarkPanel ids={ids} ref={legendRef} />
-          </LegendStressProvider>
+          </LegendMixedProvider>
 
-          <BoltStressProvider state={initialState}>
+          <BoltMixedProvider state={initialState}>
             <BoltBenchmarkPanel ids={ids} ref={boltRef} />
-          </BoltStressProvider>
+          </BoltMixedProvider>
         </section>
       </div>
     </main>
   );
 }
-
-const ZustandBenchmarkPanel = forwardRef<BenchmarkHandle, { ids: string[] }>(
-  function ZustandBenchmarkPanel({ ids }, ref) {
-    const setCell = useZustandStress((store) => store.setCell);
-    const resetStore = useZustandStress((store) => store.reset);
-    const [phase, setPhase] = useState("idle");
-    const [result, setResult] = useState<BenchmarkResult | null>(null);
-    const cellRenderCount = useRef(0);
-
-    const onCellRender = useCallback(() => {
-      cellRenderCount.current += 1;
-    }, []);
-
-    const reset = useCallback(async () => {
-      resetStore(createStressState(ids));
-      cellRenderCount.current = 0;
-      setResult(null);
-      setPhase("idle");
-      await waitForPaint();
-    }, [ids, resetStore]);
-
-    const run = useCallback(
-      async (sequence: readonly string[]) => {
-        setPhase("running");
-        await waitForPaint();
-        cellRenderCount.current = 0;
-
-        const startedAt = performance.now();
-
-        for (const id of sequence) {
-          setCell(id, (previous) => previous + 1);
-        }
-
-        const dispatchMs = performance.now() - startedAt;
-        await waitForPaint();
-
-        const nextResult = buildResult(
-          sequence,
-          dispatchMs,
-          performance.now() - startedAt,
-          cellRenderCount.current,
-        );
-
-        setResult(nextResult);
-        setPhase("done");
-        return nextResult;
-      },
-      [setCell],
-    );
-
-    useImperativeHandle(ref, () => ({ reset, run }), [reset, run]);
-
-    return (
-      <BenchmarkPanel
-        accentClassName="bg-[#2f7d62]"
-        cellComponent={ZustandCell}
-        engine="Zustand"
-        ids={ids}
-        onCellRender={onCellRender}
-        phase={phase}
-        result={result}
-      />
-    );
-  },
-);
 
 const LegendBenchmarkPanel = forwardRef<BenchmarkHandle, { ids: string[] }>(
   function LegendBenchmarkPanel({ ids }, ref) {
@@ -481,7 +459,7 @@ const LegendBenchmarkPanel = forwardRef<BenchmarkHandle, { ids: string[] }>(
     const cellRenderCount = useRef(0);
 
     if (!store) {
-      throw new Error("LegendBenchmarkPanel must be used inside LegendStressProvider");
+      throw new Error("LegendBenchmarkPanel must be used inside LegendMixedProvider");
     }
 
     const onCellRender = useCallback(() => {
@@ -489,7 +467,7 @@ const LegendBenchmarkPanel = forwardRef<BenchmarkHandle, { ids: string[] }>(
     }, []);
 
     const reset = useCallback(async () => {
-      store.set(createStressState(ids));
+      store.set(createInitialState(ids));
       cellRenderCount.current = 0;
       setResult(null);
       setPhase("idle");
@@ -497,22 +475,23 @@ const LegendBenchmarkPanel = forwardRef<BenchmarkHandle, { ids: string[] }>(
     }, [ids, store]);
 
     const run = useCallback(
-      async (sequence: readonly string[]) => {
+      async (steps: readonly WorkloadStep[], stats: WorkloadStats) => {
         setPhase("running");
         await waitForPaint();
         cellRenderCount.current = 0;
 
         const startedAt = performance.now();
 
-        for (const id of sequence) {
-          store.cells[id].set((previous) => (previous ?? 0) + 1);
+        for (const step of steps) {
+          applyLegendStep(store, step);
         }
 
         const dispatchMs = performance.now() - startedAt;
         await waitForPaint();
 
         const nextResult = buildResult(
-          sequence,
+          steps,
+          stats,
           dispatchMs,
           performance.now() - startedAt,
           cellRenderCount.current,
@@ -543,7 +522,7 @@ const LegendBenchmarkPanel = forwardRef<BenchmarkHandle, { ids: string[] }>(
 
 const BoltBenchmarkPanel = forwardRef<BenchmarkHandle, { ids: string[] }>(
   function BoltBenchmarkPanel({ ids }, ref) {
-    const set = useBoltStressSet();
+    const set = useBoltMixedSet();
     const [phase, setPhase] = useState("idle");
     const [result, setResult] = useState<BenchmarkResult | null>(null);
     const cellRenderCount = useRef(0);
@@ -553,7 +532,7 @@ const BoltBenchmarkPanel = forwardRef<BenchmarkHandle, { ids: string[] }>(
     }, []);
 
     const reset = useCallback(async () => {
-      set("", createStressState(ids));
+      set("", createInitialState(ids));
       cellRenderCount.current = 0;
       setResult(null);
       setPhase("idle");
@@ -561,22 +540,23 @@ const BoltBenchmarkPanel = forwardRef<BenchmarkHandle, { ids: string[] }>(
     }, [ids, set]);
 
     const run = useCallback(
-      async (sequence: readonly string[]) => {
+      async (steps: readonly WorkloadStep[], stats: WorkloadStats) => {
         setPhase("running");
         await waitForPaint();
         cellRenderCount.current = 0;
 
         const startedAt = performance.now();
 
-        for (const id of sequence) {
-          set(["cells", id], (previous) => previous + 1);
+        for (const step of steps) {
+          applyBoltStep(set, step);
         }
 
         const dispatchMs = performance.now() - startedAt;
         await waitForPaint();
 
         const nextResult = buildResult(
-          sequence,
+          steps,
+          stats,
           dispatchMs,
           performance.now() - startedAt,
           cellRenderCount.current,
@@ -604,6 +584,41 @@ const BoltBenchmarkPanel = forwardRef<BenchmarkHandle, { ids: string[] }>(
     );
   },
 );
+
+function applyLegendStep(store: Observable<MixedState>, step: WorkloadStep) {
+  if (step.kind === "snapshot") {
+    store.set(step.state);
+    return;
+  }
+
+  if (step.kind === "leaf") {
+    store.cells[step.update.id].set(step.update.value);
+    return;
+  }
+
+  for (const update of step.updates) {
+    store.cells[update.id].set(update.value);
+  }
+}
+
+function applyBoltStep(
+  set: ReturnType<typeof useBoltMixedSet>,
+  step: WorkloadStep,
+) {
+  if (step.kind === "snapshot") {
+    set("", step.state);
+    return;
+  }
+
+  if (step.kind === "leaf") {
+    set(["cells", step.update.id], step.update.value);
+    return;
+  }
+
+  for (const update of step.updates) {
+    set(["cells", update.id], update.value);
+  }
+}
 
 function BenchmarkPanel({
   accentClassName,
@@ -637,31 +652,31 @@ function BenchmarkPanel({
           </div>
           <Metric
             label="dispatch"
-            value={result ? formatMs(result.dispatchMs) : "—"}
+            value={result ? formatMs(result.dispatchMs) : "-"}
           />
         </div>
 
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-          <Metric label="paint" value={result ? formatMs(result.totalMs) : "—"} />
+          <Metric label="paint" value={result ? formatMs(result.totalMs) : "-"} />
           <Metric
             label="rate"
-            value={result ? formatRate(result.updatesPerMs) : "—"}
+            value={result ? formatRate(result.updatesPerMs) : "-"}
           />
           <Metric
             label="cell renders"
-            value={result ? formatNumber(result.cellRenders) : "—"}
+            value={result ? formatNumber(result.cellRenders) : "-"}
           />
           <Metric
-            label="updates"
-            value={result ? formatNumber(result.updates) : "—"}
+            label="steps"
+            value={result ? formatNumber(result.steps) : "-"}
           />
           <Metric
-            label="touched"
-            value={result ? formatNumber(result.touchedCells) : "—"}
+            label="changed values"
+            value={result ? formatNumber(result.totalChangedValues) : "-"}
           />
           <Metric
-            label="renders/update"
-            value={result ? result.renderRatio.toFixed(2) : "—"}
+            label="snapshots"
+            value={result ? formatNumber(result.snapshotSteps) : "-"}
           />
         </div>
 
@@ -688,28 +703,21 @@ function Metric({ label, value }: { label: string; value: string }) {
   );
 }
 
-const ZustandCell = memo(function ZustandCell({ id, onRender }: CellProps) {
-  const count = useZustandStress((store) => store.state.cells[id] ?? 0);
-  onRender();
-
-  return <StressCell count={count} id={id} />;
-});
-
 const LegendCell = memo(function LegendCell({ id, onRender }: CellProps) {
-  const count = useLegendStress((store) => store.cells[id].get());
+  const count = useLegendMixed((store) => store.cells[id].get());
   onRender();
 
-  return <StressCell count={count} id={id} />;
+  return <MixedCell count={count} id={id} />;
 });
 
 const BoltCell = memo(function BoltCell({ id, onRender }: CellProps) {
-  const count = useBoltStressStore(["cells", id]);
+  const count = useBoltMixedStore(["cells", id]);
   onRender();
 
-  return <StressCell count={count} id={id} />;
+  return <MixedCell count={count} id={id} />;
 });
 
-function StressCell({ count, id }: { count: number; id: string }) {
+function MixedCell({ count, id }: { count: number; id: string }) {
   return (
     <div
       className="flex aspect-[5/3] min-w-0 flex-col justify-between rounded-md border border-ink/10 bg-white px-2 py-1.5"

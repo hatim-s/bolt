@@ -9,7 +9,7 @@ export default defineConfig({
       name: "Bolt",
     },
     rollupOptions: {
-      external: ["mutative", "react"],
+      external: ["lodash/get.js", "react"],
     },
   },
 });

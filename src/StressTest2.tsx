@@ -15,35 +15,27 @@ import {
 import { createBolt } from "@hatimcodes/bolt";
 import { observable, type Observable } from "@legendapp/state";
 import { useSelector } from "@legendapp/state/react";
-import { useStore } from "zustand";
-import { createStore, type StoreApi } from "zustand/vanilla";
 
-type StressState = {
+type SnapshotState = {
   cells: Record<string, number>;
-};
-
-type ZustandStressState = {
-  state: StressState;
-  reset: (state: StressState) => void;
-  setCell: (id: string, updater: (previous: number) => number) => void;
+  revision: number;
 };
 
 type BenchmarkResult = {
   cellRenders: number;
+  commits: number;
   dispatchMs: number;
-  renderRatio: number;
+  totalChangedValues: number;
   totalMs: number;
-  touchedCells: number;
-  updates: number;
   updatesPerMs: number;
 };
 
 type BenchmarkHandle = {
   reset: () => Promise<void>;
-  run: (sequence: readonly string[]) => Promise<BenchmarkResult>;
+  run: (snapshots: readonly SnapshotState[]) => Promise<BenchmarkResult>;
 };
 
-type EngineId = "zustand" | "legend" | "bolt";
+type EngineId = "legend" | "bolt";
 
 type CellProps = {
   id: string;
@@ -51,99 +43,58 @@ type CellProps = {
 };
 
 const CELL_OPTIONS = [128, 512, 1024, 2048] as const;
-const UPDATE_OPTIONS = [1_000, 5_000, 10_000, 25_000] as const;
+const COMMIT_OPTIONS = [25, 100, 250, 500] as const;
 const DEFAULT_CELL_COUNT = 512;
-const DEFAULT_SEED = 11;
-const DEFAULT_UPDATE_COUNT = 10_000;
+const DEFAULT_COMMIT_COUNT = 100;
 
-const zustandContext = createContext<StoreApi<ZustandStressState> | null>(null);
-const legendContext = createContext<Observable<StressState> | null>(null);
+const legendContext = createContext<Observable<SnapshotState> | null>(null);
 
 const {
-  Provider: BoltStressProvider,
-  useSet: useBoltStressSet,
-  useStore: useBoltStressStore,
-} = createBolt<StressState>();
+  Provider: BoltSnapshotProvider,
+  useSet: useBoltSnapshotSet,
+  useStore: useBoltSnapshotStore,
+} = createBolt<SnapshotState>();
 
-function createStressState(ids: readonly string[]): StressState {
+function createCellIds(count: number) {
+  return Array.from({ length: count }, (_, index) => `cell-${index}`);
+}
+
+function createInitialState(ids: readonly string[]): SnapshotState {
   const cells: Record<string, number> = {};
 
   for (const id of ids) {
     cells[id] = 0;
   }
 
-  return { cells };
+  return { cells, revision: 0 };
 }
 
-function createCellIds(count: number) {
-  return Array.from({ length: count }, (_, index) => `cell-${index}`);
-}
-
-function createMutationSequence(
+function createSnapshots(
   ids: readonly string[],
-  updateCount: number,
-  seed: number,
-) {
-  let value = seed || DEFAULT_SEED;
-  const sequence: string[] = [];
+  commitCount: number,
+): SnapshotState[] {
+  let cells = createInitialState(ids).cells;
+  const snapshots: SnapshotState[] = [];
 
-  for (let index = 0; index < updateCount; index += 1) {
-    value = (value * 1_664_525 + 1_013_904_223) >>> 0;
-    sequence.push(ids[value % ids.length]);
+  for (let revision = 1; revision <= commitCount; revision += 1) {
+    const nextCells: Record<string, number> = {};
+
+    for (const id of ids) {
+      nextCells[id] = cells[id] + 1;
+    }
+
+    cells = nextCells;
+    snapshots.push({ cells, revision });
   }
 
-  return sequence;
+  return snapshots;
 }
 
-function createZustandStressStore(initialState: StressState) {
-  return createStore<ZustandStressState>((set) => ({
-    state: initialState,
-    reset: (state) => set({ state }),
-    setCell: (id, updater) => {
-      set(({ state }) => ({
-        state: {
-          cells: {
-            ...state.cells,
-            [id]: updater(state.cells[id] ?? 0),
-          },
-        },
-      }));
-    },
-  }));
-}
-
-function ZustandStressProvider({
+function LegendSnapshotProvider({
   children,
   state,
-}: PropsWithChildren<{ state: StressState }>) {
-  const storeRef = useRef<StoreApi<ZustandStressState>>(undefined);
-
-  if (!storeRef.current) {
-    storeRef.current = createZustandStressStore(state);
-  }
-
-  return createElement(
-    zustandContext.Provider,
-    { value: storeRef.current },
-    children,
-  );
-}
-
-function useZustandStress<T>(selector: (state: ZustandStressState) => T) {
-  const store = useContext(zustandContext);
-
-  if (!store) {
-    throw new Error("useZustandStress must be used inside ZustandStressProvider");
-  }
-
-  return useStore(store, selector);
-}
-
-function LegendStressProvider({
-  children,
-  state,
-}: PropsWithChildren<{ state: StressState }>) {
-  const storeRef = useRef<Observable<StressState>>(undefined);
+}: PropsWithChildren<{ state: SnapshotState }>) {
+  const storeRef = useRef<Observable<SnapshotState>>(undefined);
 
   if (!storeRef.current) {
     storeRef.current = observable(state);
@@ -156,11 +107,13 @@ function LegendStressProvider({
   );
 }
 
-function useLegendStress<T>(selector: (state: Observable<StressState>) => T) {
+function useLegendSnapshot<T>(
+  selector: (state: Observable<SnapshotState>) => T,
+) {
   const store = useContext(legendContext);
 
   if (!store) {
-    throw new Error("useLegendStress must be used inside LegendStressProvider");
+    throw new Error("useLegendSnapshot must be used inside LegendSnapshotProvider");
   }
 
   return useSelector(() => selector(store));
@@ -175,21 +128,22 @@ function waitForPaint() {
 }
 
 function buildResult(
-  sequence: readonly string[],
+  snapshots: readonly SnapshotState[],
   dispatchMs: number,
   totalMs: number,
   cellRenders: number,
 ): BenchmarkResult {
-  const updates = sequence.length;
+  const commits = snapshots.length;
+  const cellCount = Object.keys(snapshots.at(-1)?.cells ?? {}).length;
+  const totalChangedValues = commits * cellCount;
 
   return {
     cellRenders,
+    commits,
     dispatchMs,
-    renderRatio: updates === 0 ? 0 : cellRenders / updates,
+    totalChangedValues,
     totalMs,
-    touchedCells: new Set(sequence).size,
-    updates,
-    updatesPerMs: dispatchMs === 0 ? 0 : updates / dispatchMs,
+    updatesPerMs: dispatchMs === 0 ? 0 : totalChangedValues / dispatchMs,
   };
 }
 
@@ -219,26 +173,24 @@ function resultSummary(
   return `${winner} lower total-to-paint by ${delta.toFixed(1)}% (${ratio.toFixed(2)}x)`;
 }
 
-export function StressTestRoute() {
+export function StressTest2Route() {
   const [cellCount, setCellCount] = useState<number>(DEFAULT_CELL_COUNT);
-  const [updateCount, setUpdateCount] = useState<number>(DEFAULT_UPDATE_COUNT);
-  const [seed, setSeed] = useState<number>(DEFAULT_SEED);
+  const [commitCount, setCommitCount] = useState<number>(DEFAULT_COMMIT_COUNT);
   const [isRunning, setIsRunning] = useState(false);
   const [summary, setSummary] = useState("No benchmark run yet");
   const ids = useMemo(() => createCellIds(cellCount), [cellCount]);
-  const initialState = useMemo(() => createStressState(ids), [ids]);
-  const zustandRef = useRef<BenchmarkHandle>(null);
-  const boltRef = useRef<BenchmarkHandle>(null);
+  const initialState = useMemo(() => createInitialState(ids), [ids]);
+  const snapshots = useMemo(
+    () => createSnapshots(ids, commitCount),
+    [commitCount, ids],
+  );
   const legendRef = useRef<BenchmarkHandle>(null);
+  const boltRef = useRef<BenchmarkHandle>(null);
   const runCountRef = useRef(0);
 
   const resetPanels = useCallback(async () => {
     setIsRunning(true);
-    await Promise.all([
-      zustandRef.current?.reset(),
-      boltRef.current?.reset(),
-      legendRef.current?.reset(),
-    ]);
+    await Promise.all([legendRef.current?.reset(), boltRef.current?.reset()]);
     setSummary("Stores reset");
     setIsRunning(false);
   }, []);
@@ -246,73 +198,61 @@ export function StressTestRoute() {
   const runBenchmark = useCallback(async () => {
     const boltHandle = boltRef.current;
     const legendHandle = legendRef.current;
-    const zustandHandle = zustandRef.current;
 
-    if (!boltHandle || !legendHandle || !zustandHandle || isRunning) {
+    if (!boltHandle || !legendHandle || isRunning) {
       return;
     }
 
     const handles: Record<EngineId, BenchmarkHandle> = {
       bolt: boltHandle,
       legend: legendHandle,
-      zustand: zustandHandle,
     };
-
-    setIsRunning(true);
-
-    const sequence = createMutationSequence(ids, updateCount, seed);
     const order: EngineId[] =
-      runCountRef.current % 2 === 0
-        ? ["zustand", "legend", "bolt"]
-        : ["bolt", "legend", "zustand"];
-    runCountRef.current += 1;
+      runCountRef.current % 2 === 0 ? ["legend", "bolt"] : ["bolt", "legend"];
+    const results = {} as Record<EngineId, BenchmarkResult>;
 
-    await Promise.all([
-      handles.zustand.reset(),
-      handles.legend.reset(),
-      handles.bolt.reset(),
-    ]);
+    runCountRef.current += 1;
+    setIsRunning(true);
+    await Promise.all([handles.legend.reset(), handles.bolt.reset()]);
     await waitForPaint();
     setSummary(`Running ${order.join(" then ")}`);
 
-    const results = {} as Record<EngineId, BenchmarkResult>;
-
     for (const engine of order) {
       setSummary(`Running ${engine}`);
-      results[engine] = await handles[engine].run(sequence);
+      results[engine] = await handles[engine].run(snapshots);
       await waitForPaint();
     }
 
     setSummary(resultSummary(results.bolt, results.legend));
     setIsRunning(false);
-  }, [ids, isRunning, seed, updateCount]);
+  }, [isRunning, snapshots]);
 
   return (
     <main className="min-h-dvh bg-paper px-5 py-7 text-ink sm:px-8 lg:px-10">
-      <div className="mx-auto flex max-w-7xl flex-col gap-6">
+      <div className="mx-auto flex max-w-6xl flex-col gap-6">
         <header className="flex flex-col gap-5 border-b border-ink/10 pb-6 lg:flex-row lg:items-end lg:justify-between">
           <div className="flex max-w-2xl flex-col gap-2">
             <span className="font-mono text-[0.65rem] uppercase tracking-[0.22em] text-ink-faint">
-              React · Store stress test
+              React · Snapshot commit test
             </span>
             <h1 className="font-serif text-3xl font-medium leading-none text-ink sm:text-4xl">
-              Zustand vs Legend State vs Bolt
+              Legend State vs Bolt
             </h1>
             <p className="max-w-xl text-sm leading-6 text-ink-soft">
-              Same mounted grid, same deterministic mutation sequence, same
-              leaf-level subscriptions.
+              Bulk root-state commits where every mounted cell changes every
+              commit.
             </p>
           </div>
 
           <a
-            href="/"
+            href="/stress-test"
             className="w-fit rounded-md border border-ink/15 px-3 py-2 font-mono text-[0.65rem] uppercase tracking-[0.18em] text-ink-soft transition hover:border-ink/40 hover:text-ink"
           >
-            Fruit counter
+            Leaf-write test
           </a>
         </header>
 
-        <section className="grid gap-3 rounded-lg border border-ink/10 bg-card p-3 sm:grid-cols-[repeat(4,minmax(0,1fr))]">
+        <section className="grid gap-3 rounded-lg border border-ink/10 bg-card p-3 sm:grid-cols-[repeat(3,minmax(0,1fr))]">
           <label className="flex flex-col gap-1">
             <span className="font-mono text-[0.6rem] uppercase tracking-[0.18em] text-ink-faint">
               Cells
@@ -333,34 +273,20 @@ export function StressTestRoute() {
 
           <label className="flex flex-col gap-1">
             <span className="font-mono text-[0.6rem] uppercase tracking-[0.18em] text-ink-faint">
-              Updates
+              Commits
             </span>
             <select
               className="h-10 rounded-md border border-ink/10 bg-white px-3 font-mono text-sm text-ink"
               disabled={isRunning}
-              onChange={(event) => setUpdateCount(Number(event.target.value))}
-              value={updateCount}
+              onChange={(event) => setCommitCount(Number(event.target.value))}
+              value={commitCount}
             >
-              {UPDATE_OPTIONS.map((option) => (
+              {COMMIT_OPTIONS.map((option) => (
                 <option key={option} value={option}>
                   {formatNumber(option)}
                 </option>
               ))}
             </select>
-          </label>
-
-          <label className="flex flex-col gap-1">
-            <span className="font-mono text-[0.6rem] uppercase tracking-[0.18em] text-ink-faint">
-              Seed
-            </span>
-            <input
-              className="h-10 rounded-md border border-ink/10 bg-white px-3 font-mono text-sm text-ink"
-              disabled={isRunning}
-              min={1}
-              onChange={(event) => setSeed(Number(event.target.value) || 1)}
-              type="number"
-              value={seed}
-            />
           </label>
 
           <div className="flex items-end gap-2">
@@ -388,90 +314,21 @@ export function StressTestRoute() {
         </div>
 
         <section
-          className="grid gap-4 xl:grid-cols-3"
-          key={`${cellCount}-${seed}`}
+          className="grid gap-4 lg:grid-cols-2"
+          key={`${cellCount}-${commitCount}`}
         >
-          <ZustandStressProvider state={initialState}>
-            <ZustandBenchmarkPanel ids={ids} ref={zustandRef} />
-          </ZustandStressProvider>
-
-          <LegendStressProvider state={initialState}>
+          <LegendSnapshotProvider state={initialState}>
             <LegendBenchmarkPanel ids={ids} ref={legendRef} />
-          </LegendStressProvider>
+          </LegendSnapshotProvider>
 
-          <BoltStressProvider state={initialState}>
+          <BoltSnapshotProvider state={initialState}>
             <BoltBenchmarkPanel ids={ids} ref={boltRef} />
-          </BoltStressProvider>
+          </BoltSnapshotProvider>
         </section>
       </div>
     </main>
   );
 }
-
-const ZustandBenchmarkPanel = forwardRef<BenchmarkHandle, { ids: string[] }>(
-  function ZustandBenchmarkPanel({ ids }, ref) {
-    const setCell = useZustandStress((store) => store.setCell);
-    const resetStore = useZustandStress((store) => store.reset);
-    const [phase, setPhase] = useState("idle");
-    const [result, setResult] = useState<BenchmarkResult | null>(null);
-    const cellRenderCount = useRef(0);
-
-    const onCellRender = useCallback(() => {
-      cellRenderCount.current += 1;
-    }, []);
-
-    const reset = useCallback(async () => {
-      resetStore(createStressState(ids));
-      cellRenderCount.current = 0;
-      setResult(null);
-      setPhase("idle");
-      await waitForPaint();
-    }, [ids, resetStore]);
-
-    const run = useCallback(
-      async (sequence: readonly string[]) => {
-        setPhase("running");
-        await waitForPaint();
-        cellRenderCount.current = 0;
-
-        const startedAt = performance.now();
-
-        for (const id of sequence) {
-          setCell(id, (previous) => previous + 1);
-        }
-
-        const dispatchMs = performance.now() - startedAt;
-        await waitForPaint();
-
-        const nextResult = buildResult(
-          sequence,
-          dispatchMs,
-          performance.now() - startedAt,
-          cellRenderCount.current,
-        );
-
-        setResult(nextResult);
-        setPhase("done");
-        return nextResult;
-      },
-      [setCell],
-    );
-
-    useImperativeHandle(ref, () => ({ reset, run }), [reset, run]);
-
-    return (
-      <BenchmarkPanel
-        accentClassName="bg-[#2f7d62]"
-        cellComponent={ZustandCell}
-        engine="Zustand"
-        ids={ids}
-        onCellRender={onCellRender}
-        phase={phase}
-        result={result}
-      />
-    );
-  },
-);
 
 const LegendBenchmarkPanel = forwardRef<BenchmarkHandle, { ids: string[] }>(
   function LegendBenchmarkPanel({ ids }, ref) {
@@ -481,7 +338,7 @@ const LegendBenchmarkPanel = forwardRef<BenchmarkHandle, { ids: string[] }>(
     const cellRenderCount = useRef(0);
 
     if (!store) {
-      throw new Error("LegendBenchmarkPanel must be used inside LegendStressProvider");
+      throw new Error("LegendBenchmarkPanel must be used inside LegendSnapshotProvider");
     }
 
     const onCellRender = useCallback(() => {
@@ -489,7 +346,7 @@ const LegendBenchmarkPanel = forwardRef<BenchmarkHandle, { ids: string[] }>(
     }, []);
 
     const reset = useCallback(async () => {
-      store.set(createStressState(ids));
+      store.set(createInitialState(ids));
       cellRenderCount.current = 0;
       setResult(null);
       setPhase("idle");
@@ -497,22 +354,22 @@ const LegendBenchmarkPanel = forwardRef<BenchmarkHandle, { ids: string[] }>(
     }, [ids, store]);
 
     const run = useCallback(
-      async (sequence: readonly string[]) => {
+      async (snapshots: readonly SnapshotState[]) => {
         setPhase("running");
         await waitForPaint();
         cellRenderCount.current = 0;
 
         const startedAt = performance.now();
 
-        for (const id of sequence) {
-          store.cells[id].set((previous) => (previous ?? 0) + 1);
+        for (const snapshot of snapshots) {
+          store.set(snapshot);
         }
 
         const dispatchMs = performance.now() - startedAt;
         await waitForPaint();
 
         const nextResult = buildResult(
-          sequence,
+          snapshots,
           dispatchMs,
           performance.now() - startedAt,
           cellRenderCount.current,
@@ -543,7 +400,7 @@ const LegendBenchmarkPanel = forwardRef<BenchmarkHandle, { ids: string[] }>(
 
 const BoltBenchmarkPanel = forwardRef<BenchmarkHandle, { ids: string[] }>(
   function BoltBenchmarkPanel({ ids }, ref) {
-    const set = useBoltStressSet();
+    const set = useBoltSnapshotSet();
     const [phase, setPhase] = useState("idle");
     const [result, setResult] = useState<BenchmarkResult | null>(null);
     const cellRenderCount = useRef(0);
@@ -553,7 +410,7 @@ const BoltBenchmarkPanel = forwardRef<BenchmarkHandle, { ids: string[] }>(
     }, []);
 
     const reset = useCallback(async () => {
-      set("", createStressState(ids));
+      set("", createInitialState(ids));
       cellRenderCount.current = 0;
       setResult(null);
       setPhase("idle");
@@ -561,22 +418,22 @@ const BoltBenchmarkPanel = forwardRef<BenchmarkHandle, { ids: string[] }>(
     }, [ids, set]);
 
     const run = useCallback(
-      async (sequence: readonly string[]) => {
+      async (snapshots: readonly SnapshotState[]) => {
         setPhase("running");
         await waitForPaint();
         cellRenderCount.current = 0;
 
         const startedAt = performance.now();
 
-        for (const id of sequence) {
-          set(["cells", id], (previous) => previous + 1);
+        for (const snapshot of snapshots) {
+          set("", snapshot);
         }
 
         const dispatchMs = performance.now() - startedAt;
         await waitForPaint();
 
         const nextResult = buildResult(
-          sequence,
+          snapshots,
           dispatchMs,
           performance.now() - startedAt,
           cellRenderCount.current,
@@ -637,31 +494,27 @@ function BenchmarkPanel({
           </div>
           <Metric
             label="dispatch"
-            value={result ? formatMs(result.dispatchMs) : "—"}
+            value={result ? formatMs(result.dispatchMs) : "-"}
           />
         </div>
 
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-          <Metric label="paint" value={result ? formatMs(result.totalMs) : "—"} />
+          <Metric label="paint" value={result ? formatMs(result.totalMs) : "-"} />
           <Metric
             label="rate"
-            value={result ? formatRate(result.updatesPerMs) : "—"}
+            value={result ? formatRate(result.updatesPerMs) : "-"}
           />
           <Metric
             label="cell renders"
-            value={result ? formatNumber(result.cellRenders) : "—"}
+            value={result ? formatNumber(result.cellRenders) : "-"}
           />
           <Metric
-            label="updates"
-            value={result ? formatNumber(result.updates) : "—"}
+            label="commits"
+            value={result ? formatNumber(result.commits) : "-"}
           />
           <Metric
-            label="touched"
-            value={result ? formatNumber(result.touchedCells) : "—"}
-          />
-          <Metric
-            label="renders/update"
-            value={result ? result.renderRatio.toFixed(2) : "—"}
+            label="changed values"
+            value={result ? formatNumber(result.totalChangedValues) : "-"}
           />
         </div>
 
@@ -688,28 +541,21 @@ function Metric({ label, value }: { label: string; value: string }) {
   );
 }
 
-const ZustandCell = memo(function ZustandCell({ id, onRender }: CellProps) {
-  const count = useZustandStress((store) => store.state.cells[id] ?? 0);
-  onRender();
-
-  return <StressCell count={count} id={id} />;
-});
-
 const LegendCell = memo(function LegendCell({ id, onRender }: CellProps) {
-  const count = useLegendStress((store) => store.cells[id].get());
+  const count = useLegendSnapshot((store) => store.cells[id].get());
   onRender();
 
-  return <StressCell count={count} id={id} />;
+  return <SnapshotCell count={count} id={id} />;
 });
 
 const BoltCell = memo(function BoltCell({ id, onRender }: CellProps) {
-  const count = useBoltStressStore(["cells", id]);
+  const count = useBoltSnapshotStore(["cells", id]);
   onRender();
 
-  return <StressCell count={count} id={id} />;
+  return <SnapshotCell count={count} id={id} />;
 });
 
-function StressCell({ count, id }: { count: number; id: string }) {
+function SnapshotCell({ count, id }: { count: number; id: string }) {
   return (
     <div
       className="flex aspect-[5/3] min-w-0 flex-col justify-between rounded-md border border-ink/10 bg-white px-2 py-1.5"
