@@ -1,5 +1,10 @@
 # ⚡ Bolt
 
+[![npm version](https://img.shields.io/npm/v/@hatimcodes/bolt.svg?color=cb3837&logo=npm)](https://www.npmjs.com/package/@hatimcodes/bolt)
+[![bundle size](https://img.shields.io/bundlephobia/minzip/@hatimcodes/bolt?color=success&label=gzip)](https://bundlephobia.com/package/@hatimcodes/bolt)
+[![types](https://img.shields.io/npm/types/@hatimcodes/bolt?logo=typescript&logoColor=white)](https://www.npmjs.com/package/@hatimcodes/bolt)
+[![stars](https://img.shields.io/github/stars/hatim-s/bolt?style=social)](https://github.com/hatim-s/bolt)
+
 A small, fast state store for React that you talk to with **paths**, not
 selectors. ~4.3 kB gzip, no boilerplate, no providers-in-providers, and it only
 re-renders the components that actually care.
@@ -17,8 +22,8 @@ changed. Writes are immutable under the hood — you just write the path.
 You can try the live comparison playground: `bun run dev` → open `/stresstest`.
 
 ```bash
-npm install bolt react
-# or: bun add bolt react
+npm install @hatimcodes/bolt react
+# or: bun add @hatimcodes/bolt react
 ```
 
 ## First, create a store
@@ -27,7 +32,7 @@ npm install bolt react
 state shape. No actions to declare, no reducers — `set` is generic.
 
 ```tsx
-import { createBolt } from "bolt";
+import { createBolt } from "@hatimcodes/bolt";
 
 type State = {
   user: { profile: { name: string } };
@@ -156,9 +161,16 @@ derived/computed state. Bolt is young, has no middleware, and caps typed paths a
 ## Build
 
 ```sh
-bun run build:lib   # writes ESM, CJS, and .d.ts to dist/
+npm run build:lib   # writes ESM, CJS, and .d.ts to dist/
 ```
 
-## License
+## Release
 
-MIT
+```sh
+npm login
+npm run publish:from-main
+```
+
+Update the package version on `main` first. The release script resets
+`publish-npm` from `main`, checks npm auth, verifies the tarball, and publishes
+`@hatimcodes/bolt` publicly.

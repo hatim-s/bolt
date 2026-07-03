@@ -1,5 +1,5 @@
 {
-  "name": "bolt",
+  "name": "@hatimcodes/bolt",
   "version": "0.1.0",
   "description": "Path-indexed external store for React.",
   "type": "module",
@@ -20,14 +20,28 @@
   ],
   "sideEffects": false,
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hatim-s/bolt.git"
+  },
+  "bugs": {
+    "url": "https://github.com/hatim-s/bolt/issues"
+  },
+  "homepage": "https://github.com/hatim-s/bolt#readme",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
   "scripts": {
     "dev": "vite --host 0.0.0.0",
-    "predev": "bun run build:lib",
-    "build": "bun run build:lib && bun run build:app",
+    "predev": "npm run build:lib",
+    "build": "npm run build:lib && npm run build:app",
     "build:app": "tsc -b && vite build",
     "build:lib": "vite build --config vite.lib.config.ts && tsc -p tsconfig.lib.json",
-    "prepack": "bun run build:lib",
-    "prepublishOnly": "bun run build:lib",
+    "prepack": "npm run build:lib",
+    "prepublishOnly": "npm run build:lib",
+    "publish:dry": "npm publish --dry-run --access public",
+    "publish:from-main": "bash scripts/publish-from-main.sh",
     "preview": "vite preview --host 0.0.0.0 --outDir dist-playground"
   },
   "dependencies": {
