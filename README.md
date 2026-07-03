@@ -168,9 +168,32 @@ npm run build:lib   # writes ESM, CJS, and .d.ts to dist/
 
 ```sh
 npm login
-npm run publish:from-main
+npm run publish:package
 ```
 
 Update the package version on `main` first. The release script resets
-`publish-npm` from `main`, checks npm auth, verifies the tarball, and publishes
-`@hatimcodes/bolt` publicly.
+`publish` from `main`, pushes that branch to `origin`, checks npm auth, verifies
+the tarball, and publishes `@hatimcodes/bolt` publicly.
+
+If you publish with an npm access token instead of an interactive login, create
+a temporary npm config and pass it to the same wrapper:
+
+```sh
+printf "npm token: "
+read -rs NPM_TOKEN
+printf "\n"
+export NPM_TOKEN
+
+cat > /tmp/bolt-npmrc <<'EOF'
+registry=https://registry.npmjs.org/
+//registry.npmjs.org/:_authToken=${NPM_TOKEN}
+EOF
+
+NPM_CONFIG_USERCONFIG=/tmp/bolt-npmrc npm run publish:package
+
+rm /tmp/bolt-npmrc
+unset NPM_TOKEN
+```
+
+Run `./scripts/publish.sh --help` to see the branch, remote, registry, and cache
+overrides.
