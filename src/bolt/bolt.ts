@@ -162,9 +162,9 @@ export function createBolt<TState extends object>(): BoltReactApi<TState> {
 
     const setValue = useCallback(
       (valueOrUpdater: unknown) => {
-        store.set(path as BoltPath<TState>, valueOrUpdater as never);
+        store.set(pathKey as BoltPath<TState>, valueOrUpdater as never);
       },
-      [path, store],
+      [pathKey, store],
     );
 
     return hasBoundPath ? [value, setValue] : value;
