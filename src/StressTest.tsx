@@ -579,7 +579,7 @@ const ZustandCell = memo(function ZustandCell({ id, onRender }: CellProps) {
 });
 
 const BoltCell = memo(function BoltCell({ id, onRender }: CellProps) {
-  const count = useBoltStressStore(["cells", id]);
+  const [count] = useBoltStressStore(["cells", id]);
   onRender();
 
   return <StressCell count={count} id={id} />;

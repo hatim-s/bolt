@@ -194,6 +194,13 @@ export type BoltPathValue<T, Path> = Path extends undefined
 export type BoltValueOrUpdater<T> = T | ((previous: T) => T);
 
 /**
+ * Path-bound setter returned by useStore(path).
+ *
+ * The path is already captured, so callers only pass the next value or updater.
+ */
+export type BoltBoundSet<T> = (valueOrUpdater: BoltValueOrUpdater<T>) => void;
+
+/**
  * Framework-independent store API.
  *
  * Subscriptions are path-indexed. A nested write notifies the root listener and
@@ -232,7 +239,9 @@ export type BoltStoreApi<TState extends object> = {
  */
 export type BoltUseStore<TState extends object> = {
   (): TState;
-  <Path extends BoltPath<TState>>(path: Path): BoltPathValue<TState, Path>;
+  <Path extends BoltPath<TState>>(
+    path: Path,
+  ): [BoltPathValue<TState, Path>, BoltBoundSet<BoltPathValue<TState, Path>>];
 };
 
 export type BoltProviderProps<TState extends object> = PropsWithChildren<{

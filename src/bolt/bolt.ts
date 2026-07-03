@@ -17,6 +17,7 @@ import { create } from "mutative";
 import type {
   BoltPath,
   BoltPathValue,
+  BoltValueOrUpdater,
   BoltProviderProps,
   BoltReactApi,
   BoltRuntimePath,
@@ -38,6 +39,7 @@ import {
 // Re-export public types from the runtime entry so consumers can import both
 // values and types from "bolt".
 export type {
+  BoltBoundSet,
   BoltPath,
   BoltPathValue,
   BoltProviderProps,
@@ -132,7 +134,10 @@ export function createBolt<TState extends object>(): BoltReactApi<TState> {
    */
   function useStore<Path extends BoltPath<TState>>(
     path: Path,
-  ): BoltPathValue<TState, Path>;
+  ): [
+    BoltPathValue<TState, Path>,
+    (valueOrUpdater: BoltValueOrUpdater<BoltPathValue<TState, Path>>) => void,
+  ];
 
   /**
    * Subscribes React to one path and returns that path's current snapshot.
@@ -140,6 +145,7 @@ export function createBolt<TState extends object>(): BoltReactApi<TState> {
   function useStore(path?: BoltRuntimePath) {
     const store = useInternalApi();
     const pathKey = normalizePath(path);
+    const hasBoundPath = path !== undefined;
 
     // React subscriptions are keyed by normalized path strings so equivalent
     // inputs like "a.b.0" and ["a", "b", "0"] share one listener bucket.
@@ -152,7 +158,16 @@ export function createBolt<TState extends object>(): BoltReactApi<TState> {
       [pathKey, store],
     );
 
-    return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+    const value = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+
+    const setValue = useCallback(
+      (valueOrUpdater: unknown) => {
+        store.set(pathKey as BoltPath<TState>, valueOrUpdater as never);
+      },
+      [pathKey, store],
+    );
+
+    return hasBoundPath ? [value, setValue] : value;
   }
 
   /**
