@@ -3,7 +3,6 @@
  * listener dispatch.
  */
 import get from "lodash/get";
-import set from "lodash/set";
 import type { BoltRuntimePath, Listener } from "./types";
 
 /**
@@ -18,23 +17,46 @@ export function readPath(value: unknown, segments: readonly string[]) {
 }
 
 /**
- * Writes a value into a Mutative draft at the provided path.
+ * Returns a new root with one path immutably replaced.
  *
  * Missing intermediate branches are created as objects or arrays based on the
  * next path segment, which lets set("a.0.b", value) build an array at a.
  */
-export function writePath(
-  draft: unknown,
+export function writeImmutablePath<TState>(
+  root: TState,
   segments: readonly string[],
   valueOrUpdater: unknown,
-) {
+): TState {
   // Read before writing so updater functions receive the current path value.
-  const previousValue = get(draft, segments);
+  const previousValue = get(root, segments);
   const nextValue = resolveValue(valueOrUpdater, previousValue);
 
-  // Mutative gives us a mutable draft. lodash/set performs the nested write and
-  // creates missing object/array containers using lodash's path rules.
-  set(draft as object, segments, nextValue);
+  if (Object.is(previousValue, nextValue)) {
+    return root;
+  }
+
+  const nextRoot = cloneContainer(root) as TState;
+  let previousCursor: unknown = root;
+  let nextCursor = nextRoot as Indexable;
+
+  for (let index = 0; index < segments.length - 1; index += 1) {
+    const segment = segments[index];
+    const nextSegment = segments[index + 1];
+    const previousChild = isIndexable(previousCursor)
+      ? previousCursor[segment]
+      : undefined;
+    const nextChild = isIndexable(previousChild)
+      ? cloneContainer(previousChild)
+      : createContainerForSegment(nextSegment);
+
+    nextCursor[segment] = nextChild;
+    previousCursor = previousChild;
+    nextCursor = nextChild as Indexable;
+  }
+
+  nextCursor[segments[segments.length - 1]] = nextValue;
+
+  return nextRoot;
 }
 
 /**
@@ -139,4 +161,29 @@ function toSegments(path?: BoltRuntimePath) {
   // String paths are already dot-delimited. Array paths preserve caller-provided
   // segment boundaries, then stringify numeric segments for canonical keys.
   return typeof path === "string" ? path.split(".") : path.map(String);
+}
+
+type Indexable = Record<string, unknown>;
+
+function cloneContainer(value: unknown): unknown[] | Indexable {
+  if (Array.isArray(value)) {
+    return value.slice();
+  }
+
+  return { ...(value as Indexable) };
+}
+
+function createContainerForSegment(segment: string) {
+  return isArrayIndex(segment) ? [] : {};
+}
+
+function isIndexable(value: unknown): value is Indexable {
+  return (
+    (typeof value === "object" || typeof value === "function") &&
+    value !== null
+  );
+}
+
+function isArrayIndex(segment: string) {
+  return /^(0|[1-9]\d*)$/.test(segment);
 }

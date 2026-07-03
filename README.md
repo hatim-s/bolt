@@ -145,9 +145,9 @@ State lives in a closure outside React. Each `useStore(path)` registers a
 already bound to the same path. When you write `a.b.c.d`, Bolt notifies the
 listeners for `a.b.c.d` **and its prefixes** — `a.b.c`, `a.b`, `a`, and the root
 — and nobody else. So a parent watching `a.b` updates when anything beneath it
-changes, while a sibling on `a.x` never hears about it. Nested writes go through
-[Mutative](https://github.com/unadlib/mutative), which gives you mutation-style
-writes while keeping state immutable.
+changes, while a sibling on `a.x` never hears about it. Nested writes use a
+path-aware immutable writer that clones only the changed path ancestors, keeping
+state snapshots React-safe without proxy overhead.
 
 ## When *not* to reach for bolt
 
