@@ -107,6 +107,72 @@ describe("createBoltStore immutable path writes", () => {
     expect(store.get("profile.stats.visits")).toBe(5);
   });
 
+  test("lets object updaters mutate a draft without touching old snapshots", () => {
+    const store = createBoltStore<TestState>({
+      profile: { name: "Ada", stats: { visits: 1 } },
+      settings: { theme: "dark" },
+    });
+    const previousRoot = store.getState();
+    const previousStats = previousRoot.profile.stats;
+    let calls = 0;
+
+    store.subscribe("profile.stats", () => {
+      calls += 1;
+    });
+
+    store.set("profile.stats", (stats) => {
+      stats.visits += 1;
+      return stats;
+    });
+
+    const nextStats = store.get("profile.stats");
+    expect(nextStats).toEqual({ visits: 2 });
+    expect(nextStats).not.toBe(previousStats);
+    expect(previousStats.visits).toBe(1);
+    expect(previousRoot.profile.stats.visits).toBe(1);
+    expect(calls).toBe(1);
+  });
+
+  test("skips no-op object updaters", () => {
+    const store = createBoltStore<TestState>({
+      profile: { name: "Ada", stats: { visits: 1 } },
+      settings: { theme: "dark" },
+    });
+    const previousRoot = store.getState();
+    const previousStats = previousRoot.profile.stats;
+    let calls = 0;
+
+    store.subscribe("profile.stats", () => {
+      calls += 1;
+    });
+
+    store.set("profile.stats", (stats) => stats);
+
+    expect(store.getState()).toBe(previousRoot);
+    expect(store.get("profile.stats")).toBe(previousStats);
+    expect(calls).toBe(0);
+  });
+
+  test("creates missing branches when writing undefined", () => {
+    const store = createBoltStore<Record<string, unknown>>({});
+    let rootCalls = 0;
+    let parentCalls = 0;
+
+    store.subscribe("", () => {
+      rootCalls += 1;
+    });
+    store.subscribe("items.0", () => {
+      parentCalls += 1;
+    });
+
+    store.set(["items", 0, "name"], undefined);
+
+    expect(Array.isArray(store.get("items"))).toBe(true);
+    expect(store.get(["items", 0])).toEqual({ name: undefined });
+    expect(rootCalls).toBe(1);
+    expect(parentCalls).toBe(1);
+  });
+
   test("root replacement notifies all subscribed paths", () => {
     const store = createBoltStore<TestState>({
       profile: { name: "Ada", stats: { visits: 1 } },

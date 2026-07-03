@@ -29,9 +29,13 @@ export function writeImmutablePath<TState>(
 ): TState {
   // Read before writing so updater functions receive the current path value.
   const previousValue = get(root, segments);
-  const nextValue = resolveValue(valueOrUpdater, previousValue);
+  const leafExists = hasPath(root, segments);
+  const { nextValue, forceChange } = resolvePathValue(
+    valueOrUpdater,
+    previousValue,
+  );
 
-  if (Object.is(previousValue, nextValue)) {
+  if (leafExists && !forceChange && Object.is(previousValue, nextValue)) {
     return root;
   }
 
@@ -67,6 +71,38 @@ export function resolveValue(valueOrUpdater: unknown, previousValue: unknown) {
   return typeof valueOrUpdater === "function"
     ? (valueOrUpdater as (previous: unknown) => unknown)(previousValue)
     : valueOrUpdater;
+}
+
+function resolvePathValue(
+  valueOrUpdater: unknown,
+  previousValue: unknown,
+): { nextValue: unknown; forceChange: boolean } {
+  if (typeof valueOrUpdater !== "function") {
+    return { nextValue: valueOrUpdater, forceChange: false };
+  }
+
+  if (!isDraftable(previousValue)) {
+    return {
+      nextValue: (valueOrUpdater as (previous: unknown) => unknown)(
+        previousValue,
+      ),
+      forceChange: false,
+    };
+  }
+
+  const draft = cloneDraftValue(previousValue);
+  const tracker = createMutationTracker();
+  const draftProxy = trackDraft(draft, tracker);
+  const returnedValue = (valueOrUpdater as (previous: unknown) => unknown)(
+    draftProxy,
+  );
+  const nextValue = unwrapTrackedValue(returnedValue, tracker);
+
+  if (!tracker.mutated && Object.is(nextValue, draft)) {
+    return { nextValue: previousValue, forceChange: false };
+  }
+
+  return { nextValue, forceChange: tracker.mutated };
 }
 
 /**
@@ -164,6 +200,11 @@ function toSegments(path?: BoltRuntimePath) {
 }
 
 type Indexable = Record<string, unknown>;
+type MutationTracker = {
+  mutated: boolean;
+  proxiesByTarget: WeakMap<object, object>;
+  targetsByProxy: WeakMap<object, object>;
+};
 
 function cloneContainer(value: unknown): unknown[] | Indexable {
   if (Array.isArray(value)) {
@@ -177,11 +218,105 @@ function createContainerForSegment(segment: string) {
   return isArrayIndex(segment) ? [] : {};
 }
 
+function cloneDraftValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(cloneDraftValue);
+  }
+
+  if (isPlainObject(value)) {
+    const clone: Indexable = {};
+
+    for (const [key, childValue] of Object.entries(value)) {
+      clone[key] = cloneDraftValue(childValue);
+    }
+
+    return clone;
+  }
+
+  return value;
+}
+
+function createMutationTracker(): MutationTracker {
+  return {
+    mutated: false,
+    proxiesByTarget: new WeakMap(),
+    targetsByProxy: new WeakMap(),
+  };
+}
+
+function trackDraft(value: unknown, tracker: MutationTracker): unknown {
+  if (!isDraftable(value)) {
+    return value;
+  }
+
+  const existingProxy = tracker.proxiesByTarget.get(value);
+
+  if (existingProxy) {
+    return existingProxy;
+  }
+
+  const proxy = new Proxy(value, {
+    get(target, property, receiver) {
+      return trackDraft(Reflect.get(target, property, receiver), tracker);
+    },
+    set(target, property, childValue, receiver) {
+      tracker.mutated = true;
+      return Reflect.set(
+        target,
+        property,
+        unwrapTrackedValue(childValue, tracker),
+        receiver,
+      );
+    },
+    deleteProperty(target, property) {
+      tracker.mutated = true;
+      return Reflect.deleteProperty(target, property);
+    },
+  });
+
+  tracker.proxiesByTarget.set(value, proxy);
+  tracker.targetsByProxy.set(proxy, value);
+
+  return proxy;
+}
+
+function unwrapTrackedValue(value: unknown, tracker: MutationTracker): unknown {
+  return isObject(value) ? (tracker.targetsByProxy.get(value) ?? value) : value;
+}
+
+function hasPath(value: unknown, segments: readonly string[]) {
+  let cursor = value;
+
+  for (const segment of segments) {
+    if (!isIndexable(cursor) || !(segment in cursor)) {
+      return false;
+    }
+
+    cursor = cursor[segment];
+  }
+
+  return true;
+}
+
 function isIndexable(value: unknown): value is Indexable {
-  return (
-    (typeof value === "object" || typeof value === "function") &&
-    value !== null
-  );
+  return isObject(value);
+}
+
+function isDraftable(value: unknown): value is object {
+  return Array.isArray(value) || isPlainObject(value);
+}
+
+function isPlainObject(value: unknown): value is Indexable {
+  if (!isObject(value) || Array.isArray(value)) {
+    return false;
+  }
+
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function isObject(value: unknown): value is Indexable {
+  return typeof value === "object" && value !== null;
 }
 
 function isArrayIndex(segment: string) {
