@@ -19,8 +19,6 @@ to it through `useSyncExternalStore`, so it plays nicely with concurrent
 rendering, never tears, and won't wake a component that didn't subscribe to what
 changed. Writes are immutable under the hood — you just write the path.
 
-You can try the live comparison playground: `bun run dev` → open `/stresstest`.
-
 ```bash
 npm install @hatimcodes/bolt react
 # or: bun add @hatimcodes/bolt react
@@ -158,42 +156,7 @@ middleware ecosystem (`persist`, `devtools`, `immer`), transient updates, or
 derived/computed state. Bolt is young, has no middleware, and caps typed paths at
 6 levels deep. It's deliberately small.
 
-## Build
+## Contributing
 
-```sh
-npm run build:lib   # writes ESM, CJS, and .d.ts to dist/
-```
-
-## Release
-
-```sh
-npm login
-npm run publish:package
-```
-
-Update the package version on `main` first. The release script resets
-`publish` from `main`, pushes that branch to `origin`, checks npm auth, verifies
-the tarball, and publishes `@hatimcodes/bolt` publicly.
-
-If you publish with an npm access token instead of an interactive login, create
-a temporary npm config and pass it to the same wrapper:
-
-```sh
-printf "npm token: "
-read -rs NPM_TOKEN
-printf "\n"
-export NPM_TOKEN
-
-cat > /tmp/bolt-npmrc <<'EOF'
-registry=https://registry.npmjs.org/
-//registry.npmjs.org/:_authToken=${NPM_TOKEN}
-EOF
-
-NPM_CONFIG_USERCONFIG=/tmp/bolt-npmrc npm run publish:package
-
-rm /tmp/bolt-npmrc
-unset NPM_TOKEN
-```
-
-Run `./scripts/publish.sh --help` to see the branch, remote, registry, and cache
-overrides.
+Development setup, build, and the release process live in
+[CONTRIBUTING.md](./CONTRIBUTING.md).
