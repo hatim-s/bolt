@@ -124,15 +124,58 @@ export function notifyPrefixes(
 }
 
 export function notifyAll(listenersByPath: Map<string, Set<Listener>>) {
+  notifyChangedPaths(listenersByPath, [""]);
+}
+
+/**
+ * Batches notifications for all paths changed by one settled transaction.
+ */
+export function notifyChangedPaths(
+  listenersByPath: Map<string, Set<Listener>>,
+  changedPathKeys: Iterable<string>,
+) {
   const listeners = new Set<Listener>();
 
-  for (const pathListeners of listenersByPath.values()) {
-    for (const listener of pathListeners) {
-      listeners.add(listener);
+  for (const pathKey of changedPathKeys) {
+    if (pathKey === "") {
+      collectAllListeners(listenersByPath, listeners);
+      continue;
+    }
+
+    collectPathListeners(listenersByPath, "", listeners);
+
+    for (const prefix of pathPrefixes(pathKey)) {
+      collectPathListeners(listenersByPath, prefix, listeners);
     }
   }
 
   listeners.forEach((listener) => listener());
+}
+
+export function isPrefixPath(prefix: string, pathKey: string) {
+  return prefix !== "" && pathKey.startsWith(`${prefix}.`);
+}
+
+export function pathsOverlap(a: string, b: string) {
+  return (
+    a === "" ||
+    b === "" ||
+    a === b ||
+    isPrefixPath(a, b) ||
+    isPrefixPath(b, a)
+  );
+}
+
+export function pathPrefixes(pathKey: string) {
+  const prefixes: string[] = [];
+  let prefix = "";
+
+  for (const segment of splitPathKey(pathKey)) {
+    prefix = prefix ? `${prefix}.${segment}` : segment;
+    prefixes.push(prefix);
+  }
+
+  return prefixes;
 }
 
 export function normalizePath(path?: BoltRuntimePath) {
@@ -163,6 +206,27 @@ function notifyPath(
 
   if (listeners) {
     [...listeners].forEach((listener) => listener());
+  }
+}
+
+function collectPathListeners(
+  listenersByPath: Map<string, Set<Listener>>,
+  pathKey: string,
+  target: Set<Listener>,
+) {
+  for (const listener of listenersByPath.get(pathKey) ?? []) {
+    target.add(listener);
+  }
+}
+
+function collectAllListeners(
+  listenersByPath: Map<string, Set<Listener>>,
+  target: Set<Listener>,
+) {
+  for (const listeners of listenersByPath.values()) {
+    for (const listener of listeners) {
+      target.add(listener);
+    }
   }
 }
 

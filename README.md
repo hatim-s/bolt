@@ -106,6 +106,61 @@ useStore();                                 // no path = whole store
 
 Paths and `set` values are type-checked from your state, up to 6 levels deep.
 
+## Derived paths
+
+`derive(target, sources, compute)` materializes one path from other paths. The
+target behaves like normal store state: `get`, `useStore`, and `subscribe` all
+read it at the same path, and Bolt updates it before subscribers are notified.
+
+```tsx
+const { Provider, useApi, useStore } = createBolt<State>();
+
+function RegisterTotal() {
+  const api = useApi();
+
+  useEffect(() => {
+    return api.derive(
+      "cart.total",
+      ["cart.items", "cart.discount"],
+      ({ get }) => {
+        const items = get("cart.items");
+        const discount = get("cart.discount") ?? 0;
+        return items.reduce((sum, item) => sum + item.price, 0) - discount;
+      },
+    );
+  }, [api]);
+
+  return null;
+}
+
+function Total() {
+  const [total] = useStore("cart.total");
+  return <span>{total}</span>;
+}
+```
+
+Derived targets can chain. If `b` derives from `a`, and `c` derives from `b`, a
+write to `a` recomputes `b` and then `c` before React gets notified.
+
+Manual writes to a derived target are rejected by default so a normal `set` call
+does not silently fight the derivation. Put local edits or overrides in a
+separate source path instead:
+
+```ts
+api.derive("node.value", ["input.value", "node.override"], ({ get }) => {
+  return get("node.override") ?? transform(get("input.value"));
+});
+```
+
+If you really want manual writes to the target, opt in with
+`{ manualWrites: "allow" }`. The next source change may overwrite that value.
+
+Cycles are invalid. A target cannot derive from itself, one of its parents, one
+of its descendants, or an indirect dependency chain that points back to it.
+Derived compute functions are synchronous and should only return the next target
+value; async jobs, effects, and multi-target writes belong outside this v1
+primitive.
+
 ## API
 
 | Member | What it does |
@@ -114,10 +169,10 @@ Paths and `set` values are type-checked from your state, up to 6 levels deep.
 | `useStore(path)` | Subscribe to a path and return `[value, setValue]`. The setter is already bound to that path. |
 | `useStore()` | Subscribe to the whole store and return its value. |
 | `useSet()` | Returns the typed `set(path, valueOrUpdater)`. |
-| `useApi()` | Imperative `{ get, set, getState, subscribe }` — no re-render. |
+| `useApi()` | Imperative `{ get, set, getState, subscribe, derive }` — no re-render. |
 
 Need it without React (tests, vanilla code)? `createBoltStore(initialState)`
-gives you the same `get` / `set` / `subscribe`.
+gives you the same `get` / `set` / `subscribe` / `derive`.
 
 ## It stays fast as the store grows
 
@@ -144,12 +199,16 @@ shared references. Replace those values directly instead. Direct writes through
 plain, null-prototype, and simple class containers preserve own descriptors and
 prototypes; unsafe prototype path segments are rejected.
 
+Derived paths live in the same external store. When a write touches a derived
+source, Bolt settles the affected derived graph first, batches all changed paths,
+and then notifies each affected listener once.
+
 ## When *not* to reach for bolt
 
 Pick Zustand or Jotai if you want a mature, widely-audited library with a
 middleware ecosystem (`persist`, `devtools`, `immer`), transient updates, or
-derived/computed state. Bolt is young, has no middleware, and caps typed paths at
-6 levels deep. It's deliberately small.
+async derivation. Bolt is young, has no middleware, no devtools integration, and
+caps typed paths at 6 levels deep. It's deliberately small.
 
 ## Contributing
 

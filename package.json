@@ -35,6 +35,7 @@
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "predev": "npm run build:lib",
+    "test": "bun test",
     "build": "npm run build:lib && npm run build:app",
     "build:app": "tsc -b && vite build",
     "build:lib": "vite build --config vite.lib.config.ts && tsc -p tsconfig.lib.json",

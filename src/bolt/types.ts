@@ -204,6 +204,73 @@ export type BoltValueOrUpdater<T> = T | ((previous: T) => T);
  */
 export type BoltBoundSet<T> = (valueOrUpdater: BoltValueOrUpdater<T>) => void;
 
+export type BoltDeriveOptions<TValue> = {
+  /**
+   * Compares the previous target value and the next computed value.
+   */
+  equality?: (previous: TValue, next: TValue) => boolean;
+
+  /**
+   * Computes and writes the derived target immediately when registered.
+   *
+   * Defaults to true.
+   */
+  initialize?: boolean;
+
+  /**
+   * Controls normal set() calls aimed at the derived target.
+   *
+   * Defaults to "reject" so manual writes and derived writes do not silently
+   * fight over one path.
+   */
+  manualWrites?: "reject" | "allow";
+};
+
+export type BoltDerivedContext<TState extends object, TValue> = {
+  /**
+   * Reads the current post-write state without subscribing.
+   */
+  get: BoltStoreApi<TState>["get"];
+
+  /**
+   * Returns the current root state object.
+   */
+  getState: () => TState;
+
+  /**
+   * Target value before this compute writes.
+   */
+  previous: TValue;
+
+  /**
+   * Normalized dot path for the derived target.
+   */
+  targetPath: string;
+
+  /**
+   * Normalized dot paths for the declared sources.
+   */
+  sourcePaths: readonly string[];
+
+  /**
+   * Normalized paths already changed in the current write transaction.
+   */
+  changedPaths: readonly string[];
+};
+
+export type BoltDeriveCompute<TState extends object, TValue> = (
+  context: BoltDerivedContext<TState, TValue>,
+) => TValue;
+
+export type BoltDerive<TState extends object> = <
+  TargetPath extends BoltPath<TState>,
+>(
+  targetPath: TargetPath,
+  sourcePaths: readonly BoltRuntimePath[],
+  compute: BoltDeriveCompute<TState, BoltPathValue<TState, TargetPath>>,
+  options?: BoltDeriveOptions<BoltPathValue<TState, TargetPath>>,
+) => () => void;
+
 /**
  * Framework-independent store API.
  *
@@ -236,6 +303,12 @@ export type BoltStoreApi<TState extends object> = {
    * Registers a listener for a path. Nested writes notify matching prefixes.
    */
   subscribe: (path: BoltRuntimePath | undefined, listener: Listener) => () => void;
+
+  /**
+   * Materializes one path from other paths. Source writes settle derived targets
+   * before subscribers are notified.
+   */
+  derive: BoltDerive<TState>;
 };
 
 /**
