@@ -108,9 +108,10 @@ Paths and `set` values are type-checked from your state, up to 6 levels deep.
 
 ## Derived paths
 
-`derive(target, sources, compute)` materializes one path from other paths. The
-target behaves like normal store state: `get`, `useStore`, and `subscribe` all
-read it at the same path, and Bolt updates it before subscribers are notified.
+`derive(target, sources, compute)` materializes one path from other typed paths.
+The target behaves like normal store state: `get`, `useStore`, and `subscribe`
+all read it at the same path, and Bolt updates it before subscribers are
+notified.
 
 ```tsx
 const { Provider, useApi, useStore } = createBolt<State>();
@@ -142,9 +143,10 @@ function Total() {
 Derived targets can chain. If `b` derives from `a`, and `c` derives from `b`, a
 write to `a` recomputes `b` and then `c` before React gets notified.
 
-Manual writes to a derived target are rejected by default so a normal `set` call
-does not silently fight the derivation. Put local edits or overrides in a
-separate source path instead:
+Manual writes that overlap a derived target are rejected by default so a normal
+`set` call does not silently fight the derivation. That includes writes to the
+target itself, one of its parents, or one of its descendants. Put local edits or
+overrides in a separate source path instead:
 
 ```ts
 api.derive("node.value", ["input.value", "node.override"], ({ get }) => {
@@ -154,12 +156,23 @@ api.derive("node.value", ["input.value", "node.override"], ({ get }) => {
 
 If you really want manual writes to the target, opt in with
 `{ manualWrites: "allow" }`. The next source change may overwrite that value.
+Bolt then treats overlapping manual writes as changes to the derived target too,
+so downstream derived paths and subscribers stay in sync.
 
 Cycles are invalid. A target cannot derive from itself, one of its parents, one
-of its descendants, or an indirect dependency chain that points back to it.
-Derived compute functions are synchronous and should only return the next target
-value; async jobs, effects, and multi-target writes belong outside this v1
-primitive.
+of its descendants, an overlapping derived target, or an indirect dependency
+chain that points back to it. Derived compute functions are synchronous and
+should only return the next target value; async jobs, effects, nested `set`
+calls, graph mutation, and multi-target writes belong outside this v1 primitive.
+
+Source paths are type checked. For generated systems that only know paths at
+runtime, use the explicit escape hatch:
+
+```ts
+api.deriveUnsafe(dynamicTarget, dynamicSources, ({ get }) => {
+  return computeFromRuntimePaths(get);
+});
+```
 
 ## API
 
@@ -169,10 +182,10 @@ primitive.
 | `useStore(path)` | Subscribe to a path and return `[value, setValue]`. The setter is already bound to that path. |
 | `useStore()` | Subscribe to the whole store and return its value. |
 | `useSet()` | Returns the typed `set(path, valueOrUpdater)`. |
-| `useApi()` | Imperative `{ get, set, getState, subscribe, derive }` — no re-render. |
+| `useApi()` | Imperative `{ get, set, getState, subscribe, derive, deriveUnsafe }` — no re-render. |
 
 Need it without React (tests, vanilla code)? `createBoltStore(initialState)`
-gives you the same `get` / `set` / `subscribe` / `derive`.
+gives you the same `get` / `set` / `subscribe` / `derive` / `deriveUnsafe`.
 
 ## It stays fast as the store grows
 

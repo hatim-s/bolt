@@ -115,10 +115,7 @@ export function notifyPrefixes(
 ) {
   notifyPath(listenersByPath, "");
 
-  let prefix = "";
-
-  for (const segment of splitPathKey(pathKey)) {
-    prefix = prefix ? `${prefix}.${segment}` : segment;
+  for (const prefix of pathPrefixes(pathKey)) {
     notifyPath(listenersByPath, prefix);
   }
 }

@@ -266,9 +266,16 @@ export type BoltDerive<TState extends object> = <
   TargetPath extends BoltPath<TState>,
 >(
   targetPath: TargetPath,
-  sourcePaths: readonly BoltRuntimePath[],
+  sourcePaths: readonly BoltPath<TState>[],
   compute: BoltDeriveCompute<TState, BoltPathValue<TState, TargetPath>>,
   options?: BoltDeriveOptions<BoltPathValue<TState, TargetPath>>,
+) => () => void;
+
+export type BoltUnsafeDerive<TState extends object> = (
+  targetPath: BoltRuntimePath,
+  sourcePaths: readonly BoltRuntimePath[],
+  compute: BoltDeriveCompute<TState, unknown>,
+  options?: BoltDeriveOptions<unknown>,
 ) => () => void;
 
 /**
@@ -303,12 +310,19 @@ export type BoltStoreApi<TState extends object> = {
    * Registers a listener for a path. Nested writes notify matching prefixes.
    */
   subscribe: (path: BoltRuntimePath | undefined, listener: Listener) => () => void;
+};
 
+export type BoltDerivedStoreApi<TState extends object> = BoltStoreApi<TState> & {
   /**
    * Materializes one path from other paths. Source writes settle derived targets
    * before subscribers are notified.
    */
   derive: BoltDerive<TState>;
+
+  /**
+   * Untyped escape hatch for dynamic path sources.
+   */
+  deriveUnsafe: BoltUnsafeDerive<TState>;
 };
 
 /**
@@ -340,7 +354,7 @@ export type BoltReactApi<TState extends object> = {
   /**
    * Hook for imperative store access.
    */
-  useApi: () => BoltStoreApi<TState>;
+  useApi: () => BoltDerivedStoreApi<TState>;
 
   /**
    * Hook for the typed set function.
@@ -356,9 +370,9 @@ export type BoltReactApi<TState extends object> = {
 /**
  * Internal extension used by useSyncExternalStore.
  *
- * Public callers get the smaller BoltStoreApi surface from useApi.
+ * Public callers get the derived-capable store surface from useApi.
  */
-export type InternalBoltStore<TState extends object> = BoltStoreApi<TState> & {
+export type InternalBoltStore<TState extends object> = BoltDerivedStoreApi<TState> & {
   /**
    * Reads a path after it has already been normalized to a dot key.
    */

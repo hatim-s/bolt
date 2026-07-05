@@ -15,13 +15,13 @@ import {
 } from "react";
 import type {
   BoltDeriveCompute,
+  BoltDerivedStoreApi,
   BoltPath,
   BoltPathValue,
   BoltValueOrUpdater,
   BoltProviderProps,
   BoltReactApi,
   BoltRuntimePath,
-  BoltStoreApi,
   BoltUseStore,
   InternalBoltStore,
   Listener,
@@ -45,6 +45,7 @@ export type {
   BoltDerive,
   BoltDeriveCompute,
   BoltDerivedContext,
+  BoltDerivedStoreApi,
   BoltDeriveOptions,
   BoltPath,
   BoltPathValue,
@@ -52,6 +53,7 @@ export type {
   BoltReactApi,
   BoltRuntimePath,
   BoltStoreApi,
+  BoltUnsafeDerive,
   BoltUseStore,
   BoltValueOrUpdater,
 } from "./types";
@@ -66,6 +68,11 @@ type DerivedNode<TState extends object> = {
   manualWrites: "reject" | "allow";
 };
 
+type PathIndexNode = {
+  derivedIds: Set<number>;
+  children: Map<string, PathIndexNode>;
+};
+
 /**
  * Creates a standalone Bolt store without React.
  *
@@ -74,7 +81,7 @@ type DerivedNode<TState extends object> = {
  */
 export function createBoltStore<TState extends object>(
   initialState: TState,
-): BoltStoreApi<TState> {
+): BoltDerivedStoreApi<TState> {
   return createInternalBoltStore(initialState);
 }
 
@@ -136,7 +143,7 @@ export function createBolt<TState extends object>(): BoltReactApi<TState> {
    * Consumers can imperatively get/set/subscribe, but they do not receive the
    * internal normalized-path helpers used by useSyncExternalStore.
    */
-  function useApi(): BoltStoreApi<TState> {
+  function useApi(): BoltDerivedStoreApi<TState> {
     return useInternalApi();
   }
 
@@ -213,8 +220,11 @@ function createInternalBoltStore<TState extends object>(
   const listenersByPath = new Map<string, Set<Listener>>();
   const derivedByTarget = new Map<string, DerivedNode<TState>>();
   const derivedNodes = new Map<number, DerivedNode<TState>>();
+  const sourceIndexRoot = createPathIndexNode();
+  const targetIndexRoot = createPathIndexNode();
+  const downstreamByNodeId = new Map<number, Set<number>>();
   let nextDerivedId = 1;
-  let isComputingDerived = false;
+  let computeDepth = 0;
 
   /**
    * Returns the current root state object.
@@ -241,20 +251,24 @@ function createInternalBoltStore<TState extends object>(
    * Updates one path and notifies only affected subscribers.
    */
   function set(path: BoltRuntimePath, valueOrUpdater: unknown) {
-    if (isComputingDerived) {
+    if (computeDepth > 0) {
       throw new Error("Bolt derived compute functions cannot call set().");
     }
 
     // Normalize once so the same key drives both state lookup and notification.
     const pathKey = normalizePath(path);
-    const derivedOwner = derivedByTarget.get(pathKey);
+    const overlappingTargets = findOverlappingDerivedTargets(pathKey);
+    const rejectingOwner = overlappingTargets.find(
+      (node) => node.manualWrites === "reject",
+    );
 
-    if (derivedOwner?.manualWrites === "reject") {
+    if (rejectingOwner) {
       throw new Error(
-        `Bolt derived target "${pathKey}" cannot be set directly. Write an input/override path or register with manualWrites: "allow".`,
+        `Bolt derived target "${rejectingOwner.targetPathKey}" cannot be set directly. Write an input/override path or register with manualWrites: "allow".`,
       );
     }
 
+    const previousState = state;
     const didChange = writePathKey(pathKey, valueOrUpdater);
 
     if (!didChange) {
@@ -271,11 +285,21 @@ function createInternalBoltStore<TState extends object>(
       return;
     }
 
-    const changedPathKeys = new Set([pathKey]);
-    const derivedChangedPathKeys = settleDerived(changedPathKeys);
+    const changedPathKeys = new Set<string>([pathKey]);
 
-    for (const derivedPathKey of derivedChangedPathKeys) {
-      changedPathKeys.add(derivedPathKey);
+    for (const node of overlappingTargets) {
+      changedPathKeys.add(node.targetPathKey);
+    }
+
+    try {
+      const derivedChangedPathKeys = settleDerived(changedPathKeys);
+
+      for (const derivedPathKey of derivedChangedPathKeys) {
+        changedPathKeys.add(derivedPathKey);
+      }
+    } catch (error) {
+      state = previousState;
+      throw error;
     }
 
     notifyChangedPaths(listenersByPath, changedPathKeys);
@@ -308,7 +332,7 @@ function createInternalBoltStore<TState extends object>(
 
   function derive<TargetPath extends BoltPath<TState>>(
     targetPath: TargetPath,
-    sourcePaths: readonly BoltRuntimePath[],
+    sourcePaths: readonly BoltPath<TState>[],
     compute: BoltDeriveCompute<TState, BoltPathValue<TState, TargetPath>>,
     options?: {
       equality?: (
@@ -319,11 +343,60 @@ function createInternalBoltStore<TState extends object>(
       manualWrites?: "reject" | "allow";
     },
   ) {
+    return deriveInternal(
+      targetPath,
+      sourcePaths,
+      compute as BoltDeriveCompute<TState, unknown>,
+      options as
+        | {
+            equality?: (previous: unknown, next: unknown) => boolean;
+            initialize?: boolean;
+            manualWrites?: "reject" | "allow";
+          }
+        | undefined,
+    );
+  }
+
+  function deriveUnsafe(
+    targetPath: BoltRuntimePath,
+    sourcePaths: readonly BoltRuntimePath[],
+    compute: BoltDeriveCompute<TState, unknown>,
+    options?: {
+      equality?: (previous: unknown, next: unknown) => boolean;
+      initialize?: boolean;
+      manualWrites?: "reject" | "allow";
+    },
+  ) {
+    return deriveInternal(targetPath, sourcePaths, compute, options);
+  }
+
+  function deriveInternal(
+    targetPath: BoltRuntimePath,
+    sourcePaths: readonly BoltRuntimePath[],
+    compute: BoltDeriveCompute<TState, unknown>,
+    options?: {
+      equality?: (previous: unknown, next: unknown) => boolean;
+      initialize?: boolean;
+      manualWrites?: "reject" | "allow";
+    },
+  ) {
+    if (computeDepth > 0) {
+      throw new Error("Bolt derive() cannot be called inside a derived compute.");
+    }
+
     const targetPathKey = normalizePath(targetPath);
     const sourcePathKeys = [...new Set(sourcePaths.map((path) => normalizePath(path)))];
 
     if (derivedByTarget.has(targetPathKey)) {
       throw new Error(`Bolt derived target "${targetPathKey}" is already registered.`);
+    }
+
+    const overlappingTarget = findOverlappingDerivedTargets(targetPathKey)[0];
+
+    if (overlappingTarget) {
+      throw new Error(
+        `Bolt derived target "${targetPathKey}" overlaps existing derived target "${overlappingTarget.targetPathKey}".`,
+      );
     }
 
     const overlappingSource = sourcePathKeys.find((sourcePathKey) =>
@@ -341,19 +414,16 @@ function createInternalBoltStore<TState extends object>(
       targetPathKey,
       targetSegments: splitPathKey(targetPathKey),
       sourcePathKeys,
-      compute: compute as BoltDeriveCompute<TState, unknown>,
-      equality: (options?.equality ?? Object.is) as (
-        previous: unknown,
-        next: unknown,
-      ) => boolean,
+      compute,
+      equality: options?.equality ?? Object.is,
       manualWrites: options?.manualWrites ?? "reject",
     };
 
-    derivedNodes.set(node.id, node);
-    derivedByTarget.set(targetPathKey, node);
+    const previousState = state;
 
     try {
-      validateDerivedGraph();
+      registerDerivedNode(node);
+      validateNewDerivedNode(node);
 
       if (options?.initialize !== false) {
         const changedPathKeys = new Set<string>();
@@ -369,128 +439,202 @@ function createInternalBoltStore<TState extends object>(
         }
       }
     } catch (error) {
-      derivedNodes.delete(node.id);
-      derivedByTarget.delete(targetPathKey);
+      unregisterDerivedNode(node);
+      state = previousState;
       throw error;
     }
 
     let disposed = false;
 
     return () => {
+      if (computeDepth > 0) {
+        throw new Error("Bolt derived disposers cannot run inside a derived compute.");
+      }
+
       if (disposed) {
         return;
       }
 
       disposed = true;
-      derivedNodes.delete(node.id);
-      derivedByTarget.delete(targetPathKey);
+      unregisterDerivedNode(node);
     };
   }
 
-  function validateDerivedGraph() {
-    topologicallySortDerivedNodes([...derivedNodes.values()]);
-  }
-
   function settleDerived(initialChangedPathKeys: ReadonlySet<string>) {
-    const affectedNodes = collectTransitiveAffectedNodes(initialChangedPathKeys);
     const changedPathKeys = new Set(initialChangedPathKeys);
     const derivedChangedPathKeys = new Set<string>();
+    const pendingNodes = new Map<number, DerivedNode<TState>>();
 
-    if (affectedNodes.length === 0) {
-      return derivedChangedPathKeys;
-    }
+    enqueueAffectedNodes(initialChangedPathKeys, pendingNodes);
 
-    for (const node of topologicallySortDerivedNodes(affectedNodes)) {
-      if (computeAndWriteDerivedNode(node, changedPathKeys)) {
+    while (pendingNodes.size > 0) {
+      const orderedNodes = topologicallySortDerivedNodes([...pendingNodes.values()]);
+      const currentIds = new Set(orderedNodes.map((node) => node.id));
+      const processedIds = new Set<number>();
+      pendingNodes.clear();
+
+      for (const node of orderedNodes) {
+        const didChange = computeAndWriteDerivedNode(node, changedPathKeys);
+
+        processedIds.add(node.id);
+
+        if (!didChange) {
+          continue;
+        }
+
         changedPathKeys.add(node.targetPathKey);
         derivedChangedPathKeys.add(node.targetPathKey);
+        enqueueDownstreamNodes(node, pendingNodes, currentIds, processedIds);
       }
     }
 
     return derivedChangedPathKeys;
   }
 
-  function collectTransitiveAffectedNodes(
-    initialChangedPathKeys: ReadonlySet<string>,
+  function enqueueAffectedNodes(
+    changedPathKeys: Iterable<string>,
+    target: Map<number, DerivedNode<TState>>,
   ) {
-    const queue = [...initialChangedPathKeys];
-    const seenChangeKeys = new Set(queue);
-    const affectedNodes = new Map<number, DerivedNode<TState>>();
+    for (const changedPathKey of changedPathKeys) {
+      for (const node of findDependentsForChangedPath(changedPathKey)) {
+        target.set(node.id, node);
+      }
+    }
+  }
 
-    for (let index = 0; index < queue.length; index += 1) {
-      const changedPathKey = queue[index];
+  function enqueueDownstreamNodes(
+    node: DerivedNode<TState>,
+    target: Map<number, DerivedNode<TState>>,
+    currentIds: ReadonlySet<number>,
+    processedIds: ReadonlySet<number>,
+  ) {
+    for (const downstreamId of downstreamByNodeId.get(node.id) ?? []) {
+      if (currentIds.has(downstreamId) && !processedIds.has(downstreamId)) {
+        continue;
+      }
 
-      for (const node of derivedNodes.values()) {
-        if (affectedNodes.has(node.id)) {
+      const downstreamNode = derivedNodes.get(downstreamId);
+
+      if (downstreamNode) {
+        target.set(downstreamNode.id, downstreamNode);
+      }
+    }
+  }
+
+  function registerDerivedNode(node: DerivedNode<TState>) {
+    derivedNodes.set(node.id, node);
+    derivedByTarget.set(node.targetPathKey, node);
+    addPathIndexNode(targetIndexRoot, node.targetPathKey, node.id);
+
+    for (const sourcePathKey of node.sourcePathKeys) {
+      addPathIndexNode(sourceIndexRoot, sourcePathKey, node.id);
+    }
+
+    downstreamByNodeId.set(node.id, new Set());
+
+    for (const existingNode of derivedNodes.values()) {
+      if (existingNode.id === node.id) {
+        continue;
+      }
+
+      if (nodeDependsOnProducer(node, existingNode)) {
+        addDownstreamEdge(existingNode.id, node.id);
+      }
+
+      if (nodeDependsOnProducer(existingNode, node)) {
+        addDownstreamEdge(node.id, existingNode.id);
+      }
+    }
+  }
+
+  function unregisterDerivedNode(node: DerivedNode<TState>) {
+    derivedNodes.delete(node.id);
+    derivedByTarget.delete(node.targetPathKey);
+    removePathIndexNode(targetIndexRoot, node.targetPathKey, node.id);
+
+    for (const sourcePathKey of node.sourcePathKeys) {
+      removePathIndexNode(sourceIndexRoot, sourcePathKey, node.id);
+    }
+
+    downstreamByNodeId.delete(node.id);
+
+    for (const downstreamIds of downstreamByNodeId.values()) {
+      downstreamIds.delete(node.id);
+    }
+  }
+
+  function validateNewDerivedNode(node: DerivedNode<TState>) {
+    const seen = new Set<number>();
+
+    function visit(nodeId: number) {
+      for (const downstreamId of downstreamByNodeId.get(nodeId) ?? []) {
+        if (downstreamId === node.id) {
+          throw new Error(formatDerivedCycle(node.id));
+        }
+
+        if (seen.has(downstreamId)) {
           continue;
         }
 
-        const isAffected = node.sourcePathKeys.some((sourcePathKey) =>
-          pathsOverlap(sourcePathKey, changedPathKey),
-        );
-
-        if (!isAffected) {
-          continue;
-        }
-
-        affectedNodes.set(node.id, node);
-
-        if (!seenChangeKeys.has(node.targetPathKey)) {
-          seenChangeKeys.add(node.targetPathKey);
-          queue.push(node.targetPathKey);
-        }
+        seen.add(downstreamId);
+        visit(downstreamId);
       }
     }
 
-    return [...affectedNodes.values()];
+    visit(node.id);
   }
 
   function topologicallySortDerivedNodes(nodes: readonly DerivedNode<TState>[]) {
-    const visiting = new Set<number>();
-    const visited = new Set<number>();
-    const stack: DerivedNode<TState>[] = [];
     const ordered: DerivedNode<TState>[] = [];
-    const sortedNodes = [...nodes].sort((a, b) => a.id - b.id);
+    const nodeIds = new Set(nodes.map((node) => node.id));
+    const indegreeById = new Map<number, number>();
+    const ready: DerivedNode<TState>[] = [];
 
-    function visit(node: DerivedNode<TState>) {
-      if (visited.has(node.id)) {
-        return;
+    for (const node of nodes) {
+      indegreeById.set(node.id, 0);
+    }
+
+    for (const node of nodes) {
+      for (const downstreamId of downstreamByNodeId.get(node.id) ?? []) {
+        if (nodeIds.has(downstreamId)) {
+          indegreeById.set(downstreamId, (indegreeById.get(downstreamId) ?? 0) + 1);
+        }
       }
+    }
 
-      if (visiting.has(node.id)) {
-        const cycleStart = stack.findIndex((stackNode) => stackNode.id === node.id);
-        const cyclePath = [...stack.slice(cycleStart), node]
-          .map((cycleNode) => formatPathKey(cycleNode.targetPathKey))
-          .join(" -> ");
-
-        throw new Error(`Bolt derived cycle: ${cyclePath}`);
+    for (const node of nodes) {
+      if (indegreeById.get(node.id) === 0) {
+        ready.push(node);
       }
+    }
 
-      visiting.add(node.id);
-      stack.push(node);
+    ready.sort((a, b) => a.id - b.id);
 
-      for (const dependency of sortedNodes) {
-        if (dependency.id === node.id) {
+    while (ready.length > 0) {
+      const node = ready.shift()!;
+      ordered.push(node);
+
+      for (const downstreamId of downstreamByNodeId.get(node.id) ?? []) {
+        if (!nodeIds.has(downstreamId)) {
           continue;
         }
 
-        const dependsOnNode = node.sourcePathKeys.some((sourcePathKey) =>
-          pathsOverlap(dependency.targetPathKey, sourcePathKey),
-        );
+        const nextIndegree = (indegreeById.get(downstreamId) ?? 0) - 1;
+        indegreeById.set(downstreamId, nextIndegree);
 
-        if (dependsOnNode) {
-          visit(dependency);
+        if (nextIndegree === 0) {
+          const downstreamNode = derivedNodes.get(downstreamId);
+
+          if (downstreamNode) {
+            ready.push(downstreamNode);
+            ready.sort((a, b) => a.id - b.id);
+          }
         }
       }
-
-      stack.pop();
-      visiting.delete(node.id);
-      visited.add(node.id);
-      ordered.push(node);
     }
 
-    for (const node of sortedNodes) {
-      visit(node);
+    if (ordered.length !== nodes.length) {
+      throw new Error("Bolt derived cycle detected.");
     }
 
     return ordered;
@@ -515,11 +659,11 @@ function createInternalBoltStore<TState extends object>(
     previous: unknown,
     changedPathKeys: ReadonlySet<string>,
   ) {
-    isComputingDerived = true;
+    computeDepth += 1;
 
     try {
       return node.compute({
-        get: get as BoltStoreApi<TState>["get"],
+        get: get as BoltDerivedStoreApi<TState>["get"],
         getState,
         previous,
         targetPath: node.targetPathKey,
@@ -527,12 +671,193 @@ function createInternalBoltStore<TState extends object>(
         changedPaths: [...changedPathKeys],
       });
     } finally {
-      isComputingDerived = false;
+      computeDepth -= 1;
     }
+  }
+
+  function findDependentsForChangedPath(pathKey: string) {
+    const dependentIds = new Set<number>();
+
+    collectOverlappingPathIndexIds(sourceIndexRoot, pathKey, dependentIds);
+
+    return [...dependentIds]
+      .map((id) => derivedNodes.get(id))
+      .filter((node): node is DerivedNode<TState> => !!node);
+  }
+
+  function findOverlappingDerivedTargets(pathKey: string) {
+    const targetIds = new Set<number>();
+
+    collectOverlappingPathIndexIds(targetIndexRoot, pathKey, targetIds);
+
+    return [...targetIds]
+      .map((id) => derivedNodes.get(id))
+      .filter((node): node is DerivedNode<TState> => !!node);
+  }
+
+  function nodeDependsOnProducer(
+    node: DerivedNode<TState>,
+    producer: DerivedNode<TState>,
+  ) {
+    return node.sourcePathKeys.some((sourcePathKey) =>
+      pathsOverlap(producer.targetPathKey, sourcePathKey),
+    );
+  }
+
+  function addDownstreamEdge(producerId: number, dependentId: number) {
+    let downstreamIds = downstreamByNodeId.get(producerId);
+
+    if (!downstreamIds) {
+      downstreamIds = new Set();
+      downstreamByNodeId.set(producerId, downstreamIds);
+    }
+
+    downstreamIds.add(dependentId);
+  }
+
+  function formatDerivedCycle(startId: number) {
+    const path: number[] = [startId];
+    const seen = new Set<number>(path);
+
+    function findCycle(nodeId: number): boolean {
+      for (const downstreamId of downstreamByNodeId.get(nodeId) ?? []) {
+        if (downstreamId === startId) {
+          path.push(downstreamId);
+          return true;
+        }
+
+        if (seen.has(downstreamId)) {
+          continue;
+        }
+
+        seen.add(downstreamId);
+        path.push(downstreamId);
+
+        if (findCycle(downstreamId)) {
+          return true;
+        }
+
+        path.pop();
+      }
+
+      return false;
+    }
+
+    findCycle(startId);
+
+    const formattedPath = path
+      .map((id) => formatPathKey(derivedNodes.get(id)?.targetPathKey ?? `${id}`))
+      .join(" -> ");
+
+    return `Bolt derived cycle: ${formattedPath}`;
   }
 
   function formatPathKey(pathKey: string) {
     return pathKey === "" ? "<root>" : pathKey;
+  }
+
+  function createPathIndexNode(): PathIndexNode {
+    return {
+      derivedIds: new Set(),
+      children: new Map(),
+    };
+  }
+
+  function addPathIndexNode(
+    root: PathIndexNode,
+    pathKey: string,
+    derivedId: number,
+  ) {
+    let current = root;
+
+    for (const segment of splitPathKey(pathKey)) {
+      let child = current.children.get(segment);
+
+      if (!child) {
+        child = createPathIndexNode();
+        current.children.set(segment, child);
+      }
+
+      current = child;
+    }
+
+    current.derivedIds.add(derivedId);
+  }
+
+  function removePathIndexNode(
+    root: PathIndexNode,
+    pathKey: string,
+    derivedId: number,
+  ) {
+    const stack: Array<[PathIndexNode, string]> = [];
+    let current = root;
+
+    for (const segment of splitPathKey(pathKey)) {
+      const child = current.children.get(segment);
+
+      if (!child) {
+        return;
+      }
+
+      stack.push([current, segment]);
+      current = child;
+    }
+
+    current.derivedIds.delete(derivedId);
+
+    for (let index = stack.length - 1; index >= 0; index -= 1) {
+      const [parent, segment] = stack[index];
+      const child = parent.children.get(segment);
+
+      if (!child || child.derivedIds.size > 0 || child.children.size > 0) {
+        break;
+      }
+
+      parent.children.delete(segment);
+    }
+  }
+
+  function collectOverlappingPathIndexIds(
+    root: PathIndexNode,
+    pathKey: string,
+    target: Set<number>,
+  ) {
+    if (pathKey === "") {
+      collectPathIndexSubtree(root, target);
+      return;
+    }
+
+    let current: PathIndexNode | undefined = root;
+
+    for (const id of root.derivedIds) {
+      target.add(id);
+    }
+
+    for (const segment of splitPathKey(pathKey)) {
+      current = current?.children.get(segment);
+
+      if (!current) {
+        return;
+      }
+
+      for (const id of current.derivedIds) {
+        target.add(id);
+      }
+    }
+
+    for (const child of current.children.values()) {
+      collectPathIndexSubtree(child, target);
+    }
+  }
+
+  function collectPathIndexSubtree(node: PathIndexNode, target: Set<number>) {
+    for (const id of node.derivedIds) {
+      target.add(id);
+    }
+
+    for (const child of node.children.values()) {
+      collectPathIndexSubtree(child, target);
+    }
   }
 
   /**
@@ -571,11 +896,12 @@ function createInternalBoltStore<TState extends object>(
   // Cast public get/set overloads at the boundary; the runtime implementation is
   // path-agnostic and the exported API carries the type safety.
   return {
-    get: get as BoltStoreApi<TState>["get"],
+    get: get as BoltDerivedStoreApi<TState>["get"],
     getByPathKey,
     getState,
-    derive: derive as BoltStoreApi<TState>["derive"],
-    set: set as BoltStoreApi<TState>["set"],
+    derive: derive as BoltDerivedStoreApi<TState>["derive"],
+    deriveUnsafe: deriveUnsafe as BoltDerivedStoreApi<TState>["deriveUnsafe"],
+    set: set as BoltDerivedStoreApi<TState>["set"],
     subscribe,
     subscribePathKey,
   };

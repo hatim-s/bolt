@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { createBoltStore } from "./bolt";
+import { createBoltStore, type BoltStoreApi } from "./bolt";
 
 type TestState = {
   a: number;
@@ -53,6 +53,21 @@ describe("Bolt derived paths", () => {
     expect(calls).toEqual(["root", "nested", "nested.x", "nested.x.y"]);
   });
 
+  test("keeps duplicate listener calls unchanged without a derived graph", () => {
+    const store = createBoltStore({ a: { b: 1 } });
+    let calls = 0;
+    const listener = () => {
+      calls += 1;
+    };
+
+    store.subscribe(undefined, listener);
+    store.subscribe("a", listener);
+    store.subscribe("a.b", listener);
+    store.set("a.b", 2);
+
+    expect(calls).toBe(3);
+  });
+
   test("initializes a derived target and disposes idempotently", () => {
     const store = createTestStore();
     let targetCalls = 0;
@@ -77,11 +92,16 @@ describe("Bolt derived paths", () => {
     const store = createTestStore();
     const seen: number[] = [];
 
-    store.derive("b", ["nested.x.y"], ({ get }) => {
-      const next = get("nested.x.y") * 2;
-      seen.push(next);
-      return next;
-    });
+    store.derive(
+      "b",
+      ["nested.x.y"],
+      ({ get }) => {
+        const next = get("nested.x.y") * 2;
+        seen.push(next);
+        return next;
+      },
+      { manualWrites: "allow" },
+    );
 
     store.set("nested.x.y", 2);
     store.set("nested.x", { y: 3 });
@@ -196,8 +216,160 @@ describe("Bolt derived paths", () => {
     );
 
     expect(() => store.derive("a", ["b"], ({ get }) => get("b"))).toThrow(
-      "Bolt derived cycle: b -> a -> b",
+      "Bolt derived cycle: a -> b -> a",
     );
+  });
+
+  test("rejects overlapping derived targets", () => {
+    const store = createBoltStore({
+      x: 1,
+      y: 2,
+      a: {
+        b: 0,
+        c: 0,
+      },
+    });
+
+    store.derive("a", ["x"], ({ get }) => ({ b: get("x"), c: 0 }));
+
+    expect(() => store.derive("a.b", ["y"], ({ get }) => get("y") * 10)).toThrow(
+      'Bolt derived target "a.b" overlaps existing derived target "a".',
+    );
+  });
+
+  test("guards manual writes that overlap derived targets", () => {
+    const rejectingStore = createTestStore();
+
+    rejectingStore.derive("node.value", ["a"], ({ get }) => get("a") * 2);
+
+    expect(() => rejectingStore.set("node", { value: 99, other: 1 })).toThrow(
+      'Bolt derived target "node.value" cannot be set directly.',
+    );
+    expect(() => rejectingStore.set("node.value.extra" as never, 1)).toThrow(
+      'Bolt derived target "node.value" cannot be set directly.',
+    );
+
+    const allowingStore = createTestStore();
+    let downstreamCalls = 0;
+
+    allowingStore.derive("node.value", ["a"], ({ get }) => get("a") * 2, {
+      manualWrites: "allow",
+    });
+    allowingStore.derive("b", ["node.value"], ({ get }) => get("node.value") + 1);
+    allowingStore.subscribe("b", () => {
+      downstreamCalls += 1;
+    });
+
+    allowingStore.set("node", { value: 99, override: 1 });
+
+    expect(allowingStore.get("node.value")).toBe(99);
+    expect(allowingStore.get("b")).toBe(100);
+    expect(downstreamCalls).toBe(1);
+  });
+
+  test("rolls back source and derived writes when compute throws", () => {
+    const store = createTestStore();
+    let calls = 0;
+
+    store.subscribe("a", () => {
+      calls += 1;
+    });
+    store.derive("b", ["a"], ({ get }) => {
+      if (get("a") === 2) {
+        throw new Error("boom");
+      }
+
+      return get("a") * 2;
+    });
+
+    expect(() => store.set("a", 2)).toThrow("boom");
+    expect(store.get("a")).toBe(1);
+    expect(store.get("b")).toBe(2);
+    expect(calls).toBe(0);
+  });
+
+  test("does not run downstream computes when upstream equality passes", () => {
+    const store = createTestStore();
+
+    store.derive("b", ["a"], () => 0);
+    store.derive(
+      "c",
+      ["b"],
+      () => {
+        throw new Error("should not run");
+      },
+      { initialize: false },
+    );
+
+    expect(() => store.set("a", 2)).not.toThrow();
+    expect(store.get("c")).toBe(0);
+  });
+
+  test("rejects derived graph mutation and set calls while computing", () => {
+    const store = createTestStore();
+    let dispose: (() => void) | undefined;
+
+    dispose = store.derive("c", ["z"], ({ get }) => get("z") + 1);
+
+    expect(() =>
+      store.derive("b", ["a"], () => {
+        store.derive("z", [], () => 1);
+        return 2;
+      }),
+    ).toThrow("Bolt derive() cannot be called inside a derived compute.");
+
+    expect(() =>
+      store.derive("b", ["a"], () => {
+        dispose?.();
+        return 2;
+      }),
+    ).toThrow("Bolt derived disposers cannot run inside a derived compute.");
+
+    expect(() =>
+      store.derive("b", ["a"], () => {
+        store.set("z", 1);
+        return 2;
+      }),
+    ).toThrow("Bolt derived compute functions cannot call set().");
+
+    store.set("a", 2);
+    expect(store.get("b")).toBe(0);
+  });
+
+  test("registers and settles long derived chains without quadratic blowups", () => {
+    type ChainState = Record<`n${number}`, number>;
+    const initialState: ChainState = {};
+    const size = 600;
+
+    for (let index = 0; index <= size; index += 1) {
+      initialState[`n${index}`] = 0;
+    }
+
+    const store = createBoltStore(initialState);
+    const start = performance.now();
+
+    for (let index = 1; index <= size; index += 1) {
+      const target = `n${index}` as keyof ChainState & string;
+      const source = `n${index - 1}` as keyof ChainState & string;
+
+      store.derive(target, [source], ({ get }) => get(source) + 1);
+    }
+
+    store.set("n0", 1);
+
+    expect(store.get(`n${size}` as keyof ChainState & string)).toBe(size + 1);
+    expect(performance.now() - start).toBeLessThan(2000);
+  });
+
+  test("keeps the base store interface mock-compatible", () => {
+    const fake: BoltStoreApi<{ count: number }> = {
+      getState: () => ({ count: 0 }),
+      get: (() => 0) as BoltStoreApi<{ count: number }>["get"],
+      set: () => {},
+      subscribe: () => () => {},
+    };
+
+    expect(fake.getState().count).toBe(0);
   });
 
   test("dedupes listeners across source and derived target notifications", () => {
