@@ -40,6 +40,7 @@ type ObjectKey = string | number;
  * Runtime path segment format accepted in array paths.
  */
 type PathSegment = string | number;
+type NumericPathSegment = number | `${number}`;
 
 /**
  * Subscription callback stored by Bolt.
@@ -91,7 +92,7 @@ type SegmentTail<T, TDepth extends Depth> = SegmentPath<
   NonNullable<T>,
   PreviousDepth[TDepth]
 > extends infer Tail
-  ? Tail extends readonly string[]
+  ? Tail extends readonly PathSegment[]
     ? Tail
     : never
   : never;
@@ -108,13 +109,16 @@ type SegmentPath<T, TDepth extends Depth = 6> = TDepth extends 0
     ? never
     : T extends readonly (infer Item)[]
       ?
-          | readonly [`${number}`]
-          | readonly [`${number}`, ...SegmentTail<Item, TDepth>]
+          | readonly [NumericPathSegment]
+          | readonly [NumericPathSegment, ...SegmentTail<Item, TDepth>]
       : T extends object
         ? {
             [Key in Extract<keyof T, ObjectKey>]:
-              | readonly [`${Key}`]
-              | readonly [`${Key}`, ...SegmentTail<T[Key], TDepth>];
+              | readonly [Key extends number ? Key | `${Key}` : `${Key}`]
+              | readonly [
+                  Key extends number ? Key | `${Key}` : `${Key}`,
+                  ...SegmentTail<T[Key], TDepth>,
+                ];
           }[Extract<keyof T, ObjectKey>]
         : never;
 

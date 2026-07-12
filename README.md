@@ -121,22 +121,10 @@ gives you the same `get` / `set` / `subscribe`.
 
 ## It stays fast as the store grows
 
-Same mounted grid of N cells, each cell leaf-subscribed to its own value (a
-Zustand selector vs a Bolt path), driven by the **same 10,000 single-cell
-updates**. Both re-render the *same* cells — so this is pure store-dispatch cost,
-not wasted renders. Chrome, Apple Silicon, React 19. **Lower is better.**
-
-| Cells | Zustand dispatch | Bolt dispatch | Zustand → paint | Bolt → paint | Bolt faster |
-| ---: | ---: | ---: | ---: | ---: | ---: |
-| 128 | 165 ms | **79 ms** | 209 ms | **100 ms** | **52%** |
-| 512 | 882 ms | **364 ms** | 1056 ms | **413 ms** | **61%** |
-| 1024 | 2055 ms | **462 ms** | 2386 ms | **565 ms** | **76%** |
-| 2048 | 4045 ms | **876 ms** | 4612 ms | **1066 ms** | **77%** |
-
-The gap **widens with size**: Zustand re-runs every selector on every write
-(O(subscribers)), while Bolt only wakes the touched path's parents (O(depth)). At
-2048 cells Bolt dispatches the same updates ~4.6× faster. Run it yourself with
-`bun run dev` → `/stresstest` (numbers vary by machine; the trend is the point).
+Bolt indexes listeners by path: a nested write wakes the root, the written path,
+and its prefixes—not unrelated subscriptions. Direct path writes clone only the
+ancestor chain. Run `bun run bench:immutable` for machine-specific medians and
+p95 values across leaf, deep, mutation-style updater, and no-op workloads.
 
 ## How it works
 
@@ -145,9 +133,16 @@ State lives in a closure outside React. Each `useStore(path)` registers a
 already bound to the same path. When you write `a.b.c.d`, Bolt notifies the
 listeners for `a.b.c.d` **and its prefixes** — `a.b.c`, `a.b`, `a`, and the root
 — and nobody else. So a parent watching `a.b` updates when anything beneath it
-changes, while a sibling on `a.x` never hears about it. Nested writes use a
-path-aware immutable writer that clones only the changed path ancestors, keeping
-state snapshots React-safe without proxy overhead.
+changes, while a sibling on `a.x` never hears about it. Direct nested writes
+clone only changed ancestors. Object and collection updater callbacks use a
+lazy copy-on-write draft, so untouched descendants keep their references.
+
+Updater callbacks intentionally reject values that cannot keep this snapshot
+contract without exposing mutable state: `Date`, `RegExp`, typed arrays,
+custom-class instances, accessor properties, and graphs containing cycles or
+shared references. Replace those values directly instead. Direct writes through
+plain, null-prototype, and simple class containers preserve own descriptors and
+prototypes; unsafe prototype path segments are rejected.
 
 ## When *not* to reach for bolt
 

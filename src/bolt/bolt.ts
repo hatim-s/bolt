@@ -30,7 +30,7 @@ import {
   notifyAll,
   notifyPrefixes,
   readPath,
-  resolveValue,
+  resolveImmutableValue,
   splitPathKey,
   writeImmutablePath,
 } from "./utils";
@@ -228,7 +228,7 @@ function createInternalBoltStore<TState extends object>(
     // Root updates replace the whole state. Nested updates clone only the root
     // and changed path ancestors so path snapshots stay React-safe.
     if (segments.length === 0) {
-      state = resolveValue(valueOrUpdater, state) as TState;
+      state = resolveImmutableValue(valueOrUpdater, state) as TState;
     } else {
       state = writeImmutablePath(state, segments, valueOrUpdater);
     }
