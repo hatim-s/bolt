@@ -237,6 +237,69 @@ function toSegments(path?: BoltRuntimePath) {
 
 type Indexable = Record<string, unknown>;
 
+export type ImmutablePathWriteBatch<TState> = {
+  write: (segments: readonly string[], value: unknown) => TState;
+};
+
+/**
+ * Applies multiple already-resolved nested writes with one shared clone tree.
+ * Derived settlement uses this so a wide fan-out does not clone the root once
+ * for every computed target.
+ */
+export function createImmutablePathWriteBatch<TState extends object>(
+  root: TState,
+): ImmutablePathWriteBatch<TState> {
+  let nextRoot: TState | undefined;
+
+  return {
+    write(segments, value) {
+      assertSafePathSegments(segments);
+
+      if (segments.length === 0) {
+        nextRoot = value as TState;
+        return nextRoot;
+      }
+
+      if (!nextRoot) {
+        nextRoot = cloneContainer(root) as TState;
+      }
+
+      let previousCursor: unknown = root;
+      let nextCursor = nextRoot as Indexable;
+
+      for (let index = 0; index < segments.length - 1; index += 1) {
+        const segment = segments[index];
+        const nextSegment = segments[index + 1];
+        const previousChild = readOwnProperty(previousCursor, segment);
+        const currentChild = readOwnProperty(nextCursor, segment);
+        const nextChild = isPathContainer(previousChild)
+          ? currentChild === previousChild
+            ? cloneContainer(previousChild)
+            : currentChild
+          : isPathContainer(currentChild)
+            ? currentChild
+            : createContainerForSegment(nextSegment);
+
+        if (!isPathContainer(nextChild)) {
+          throw new TypeError(
+            `Bolt cannot safely traverse ${describeValue(nextChild as object)}; replace it directly instead.`,
+          );
+        }
+
+        if (nextChild !== currentChild) {
+          defineOwnValue(nextCursor, segment, nextChild);
+        }
+
+        previousCursor = previousChild;
+        nextCursor = nextChild as Indexable;
+      }
+
+      defineOwnValue(nextCursor, segments[segments.length - 1], value);
+      return nextRoot;
+    },
+  };
+}
+
 function cloneContainer(value: unknown): unknown[] | Indexable {
   if (!isPathContainer(value)) {
     throw new TypeError(

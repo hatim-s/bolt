@@ -22,6 +22,7 @@ import type {
   BoltProviderProps,
   BoltReactApi,
   BoltRuntimePath,
+  BoltUnsafeDeriveCompute,
   BoltUseStore,
   InternalBoltStore,
   Listener,
@@ -33,6 +34,8 @@ import {
   notifyPrefixes,
   pathsOverlap,
   readPath,
+  createImmutablePathWriteBatch,
+  type ImmutablePathWriteBatch,
   resolveImmutableValue,
   splitPathKey,
   writeImmutablePath,
@@ -54,6 +57,8 @@ export type {
   BoltRuntimePath,
   BoltStoreApi,
   BoltUnsafeDerive,
+  BoltUnsafeDeriveCompute,
+  BoltUnsafeDerivedContext,
   BoltUseStore,
   BoltValueOrUpdater,
 } from "./types";
@@ -224,7 +229,12 @@ function createInternalBoltStore<TState extends object>(
   const targetIndexRoot = createPathIndexNode();
   const downstreamByNodeId = new Map<number, Set<number>>();
   let nextDerivedId = 1;
-  let computeDepth = 0;
+  let derivedExecutionDepth = 0;
+  let isDispatchingNotifications = false;
+  let isFlushingDeferredWrites = false;
+  const pendingNotificationBatches: Set<string>[] = [];
+  const deferredWrites: Array<() => void> = [];
+  let activeDerivedWriteBatch: ImmutablePathWriteBatch<TState> | undefined;
 
   /**
    * Returns the current root state object.
@@ -251,8 +261,16 @@ function createInternalBoltStore<TState extends object>(
    * Updates one path and notifies only affected subscribers.
    */
   function set(path: BoltRuntimePath, valueOrUpdater: unknown) {
-    if (computeDepth > 0) {
-      throw new Error("Bolt derived compute functions cannot call set().");
+    if (derivedExecutionDepth > 0) {
+      throw new Error("Bolt derived callbacks cannot call set().");
+    }
+
+    // A listener observes one fully settled transaction. Writes it triggers are
+    // serialized after the current notification batch instead of interleaving
+    // snapshots seen by later listeners in that batch.
+    if (isDispatchingNotifications) {
+      deferredWrites.push(() => set(path, valueOrUpdater));
+      return;
     }
 
     // Normalize once so the same key drives both state lookup and notification.
@@ -276,12 +294,7 @@ function createInternalBoltStore<TState extends object>(
     }
 
     if (derivedNodes.size === 0) {
-      if (pathKey === "") {
-        notifyAll(listenersByPath);
-        return;
-      }
-
-      notifyPrefixes(listenersByPath, pathKey);
+      notifyLegacyPath(pathKey);
       return;
     }
 
@@ -302,7 +315,7 @@ function createInternalBoltStore<TState extends object>(
       throw error;
     }
 
-    notifyChangedPaths(listenersByPath, changedPathKeys);
+    notifySettledPaths(changedPathKeys);
   }
 
   /**
@@ -315,6 +328,14 @@ function createInternalBoltStore<TState extends object>(
   ) {
     const segments = splitPathKey(pathKey);
     const previousState = state;
+
+    if (!resolveUpdater && activeDerivedWriteBatch) {
+      state = activeDerivedWriteBatch.write(segments, valueOrUpdater);
+      // The batch deliberately keeps one working root reference across all
+      // derived writes, while equality has already established this path value
+      // changed.
+      return true;
+    }
 
     // Root updates replace the whole state. Nested updates clone only the root
     // and changed path ancestors so path snapshots stay React-safe.
@@ -360,14 +381,19 @@ function createInternalBoltStore<TState extends object>(
   function deriveUnsafe(
     targetPath: BoltRuntimePath,
     sourcePaths: readonly BoltRuntimePath[],
-    compute: BoltDeriveCompute<TState, unknown>,
+    compute: BoltUnsafeDeriveCompute<TState>,
     options?: {
       equality?: (previous: unknown, next: unknown) => boolean;
       initialize?: boolean;
       manualWrites?: "reject" | "allow";
     },
   ) {
-    return deriveInternal(targetPath, sourcePaths, compute, options);
+    return deriveInternal(
+      targetPath,
+      sourcePaths,
+      compute as BoltDeriveCompute<TState, unknown>,
+      options,
+    );
   }
 
   function deriveInternal(
@@ -380,8 +406,8 @@ function createInternalBoltStore<TState extends object>(
       manualWrites?: "reject" | "allow";
     },
   ) {
-    if (computeDepth > 0) {
-      throw new Error("Bolt derive() cannot be called inside a derived compute.");
+    if (derivedExecutionDepth > 0) {
+      throw new Error("Bolt derive() cannot be called inside a derived callback.");
     }
 
     const targetPathKey = normalizePath(targetPath);
@@ -435,7 +461,7 @@ function createInternalBoltStore<TState extends object>(
             changedPathKeys.add(downstreamPathKey);
           }
 
-          notifyChangedPaths(listenersByPath, changedPathKeys);
+          notifySettledPaths(changedPathKeys);
         }
       }
     } catch (error) {
@@ -447,8 +473,8 @@ function createInternalBoltStore<TState extends object>(
     let disposed = false;
 
     return () => {
-      if (computeDepth > 0) {
-        throw new Error("Bolt derived disposers cannot run inside a derived compute.");
+      if (derivedExecutionDepth > 0) {
+        throw new Error("Bolt derived disposers cannot run inside a derived callback.");
       }
 
       if (disposed) {
@@ -464,31 +490,37 @@ function createInternalBoltStore<TState extends object>(
     const changedPathKeys = new Set(initialChangedPathKeys);
     const derivedChangedPathKeys = new Set<string>();
     const pendingNodes = new Map<number, DerivedNode<TState>>();
+    const previousBatch = activeDerivedWriteBatch;
+    activeDerivedWriteBatch = createImmutablePathWriteBatch(state);
 
-    enqueueAffectedNodes(initialChangedPathKeys, pendingNodes);
+    try {
+      enqueueAffectedNodes(initialChangedPathKeys, pendingNodes);
 
-    while (pendingNodes.size > 0) {
-      const orderedNodes = topologicallySortDerivedNodes([...pendingNodes.values()]);
-      const currentIds = new Set(orderedNodes.map((node) => node.id));
-      const processedIds = new Set<number>();
-      pendingNodes.clear();
+      while (pendingNodes.size > 0) {
+        const orderedNodes = topologicallySortDerivedNodes([...pendingNodes.values()]);
+        const currentIds = new Set(orderedNodes.map((node) => node.id));
+        const processedIds = new Set<number>();
+        pendingNodes.clear();
 
-      for (const node of orderedNodes) {
-        const didChange = computeAndWriteDerivedNode(node, changedPathKeys);
+        for (const node of orderedNodes) {
+          const didChange = computeAndWriteDerivedNode(node, changedPathKeys);
 
-        processedIds.add(node.id);
+          processedIds.add(node.id);
 
-        if (!didChange) {
-          continue;
+          if (!didChange) {
+            continue;
+          }
+
+          changedPathKeys.add(node.targetPathKey);
+          derivedChangedPathKeys.add(node.targetPathKey);
+          enqueueDownstreamNodes(node, pendingNodes, currentIds, processedIds);
         }
-
-        changedPathKeys.add(node.targetPathKey);
-        derivedChangedPathKeys.add(node.targetPathKey);
-        enqueueDownstreamNodes(node, pendingNodes, currentIds, processedIds);
       }
-    }
 
-    return derivedChangedPathKeys;
+      return derivedChangedPathKeys;
+    } finally {
+      activeDerivedWriteBatch = previousBatch;
+    }
   }
 
   function enqueueAffectedNodes(
@@ -522,6 +554,17 @@ function createInternalBoltStore<TState extends object>(
   }
 
   function registerDerivedNode(node: DerivedNode<TState>) {
+    // Discover only nodes connected to the new target/source paths. Scanning all
+    // nodes here turns dynamic registration into O(n²).
+    const producerIds = new Set<number>();
+
+    for (const sourcePathKey of node.sourcePathKeys) {
+      collectOverlappingPathIndexIds(targetIndexRoot, sourcePathKey, producerIds);
+    }
+
+    const consumerIds = new Set<number>();
+    collectOverlappingPathIndexIds(sourceIndexRoot, node.targetPathKey, consumerIds);
+
     derivedNodes.set(node.id, node);
     derivedByTarget.set(node.targetPathKey, node);
     addPathIndexNode(targetIndexRoot, node.targetPathKey, node.id);
@@ -532,18 +575,12 @@ function createInternalBoltStore<TState extends object>(
 
     downstreamByNodeId.set(node.id, new Set());
 
-    for (const existingNode of derivedNodes.values()) {
-      if (existingNode.id === node.id) {
-        continue;
-      }
+    for (const producerId of producerIds) {
+      addDownstreamEdge(producerId, node.id);
+    }
 
-      if (nodeDependsOnProducer(node, existingNode)) {
-        addDownstreamEdge(existingNode.id, node.id);
-      }
-
-      if (nodeDependsOnProducer(existingNode, node)) {
-        addDownstreamEdge(node.id, existingNode.id);
-      }
+    for (const consumerId of consumerIds) {
+      addDownstreamEdge(node.id, consumerId);
     }
   }
 
@@ -608,10 +645,11 @@ function createInternalBoltStore<TState extends object>(
       }
     }
 
-    ready.sort((a, b) => a.id - b.id);
-
-    while (ready.length > 0) {
-      const node = ready.shift()!;
+    // `nodes` comes from insertion-ordered Maps and downstream Sets, so this
+    // FIFO preserves deterministic registration order without re-sorting or
+    // shifting an array for every node.
+    for (let readyIndex = 0; readyIndex < ready.length; readyIndex += 1) {
+      const node = ready[readyIndex];
       ordered.push(node);
 
       for (const downstreamId of downstreamByNodeId.get(node.id) ?? []) {
@@ -627,7 +665,6 @@ function createInternalBoltStore<TState extends object>(
 
           if (downstreamNode) {
             ready.push(downstreamNode);
-            ready.sort((a, b) => a.id - b.id);
           }
         }
       }
@@ -645,24 +682,24 @@ function createInternalBoltStore<TState extends object>(
     changedPathKeys: ReadonlySet<string>,
   ) {
     const previous = readPath(state, node.targetSegments);
-    const next = computeDerivedValue(node, previous, changedPathKeys);
+    const { next, isEqual } = evaluateDerivedNode(node, previous, changedPathKeys);
 
-    if (node.equality(previous, next)) {
+    if (isEqual) {
       return false;
     }
 
     return writePathKey(node.targetPathKey, next, false);
   }
 
-  function computeDerivedValue(
+  function evaluateDerivedNode(
     node: DerivedNode<TState>,
     previous: unknown,
     changedPathKeys: ReadonlySet<string>,
   ) {
-    computeDepth += 1;
+    derivedExecutionDepth += 1;
 
     try {
-      return node.compute({
+      const next = node.compute({
         get: get as BoltDerivedStoreApi<TState>["get"],
         getState,
         previous,
@@ -670,8 +707,10 @@ function createInternalBoltStore<TState extends object>(
         sourcePaths: node.sourcePathKeys,
         changedPaths: [...changedPathKeys],
       });
+
+      return { next, isEqual: node.equality(previous, next) };
     } finally {
-      computeDepth -= 1;
+      derivedExecutionDepth -= 1;
     }
   }
 
@@ -693,15 +732,6 @@ function createInternalBoltStore<TState extends object>(
     return [...targetIds]
       .map((id) => derivedNodes.get(id))
       .filter((node): node is DerivedNode<TState> => !!node);
-  }
-
-  function nodeDependsOnProducer(
-    node: DerivedNode<TState>,
-    producer: DerivedNode<TState>,
-  ) {
-    return node.sourcePathKeys.some((sourcePathKey) =>
-      pathsOverlap(producer.targetPathKey, sourcePathKey),
-    );
   }
 
   function addDownstreamEdge(producerId: number, dependentId: number) {
@@ -754,6 +784,64 @@ function createInternalBoltStore<TState extends object>(
 
   function formatPathKey(pathKey: string) {
     return pathKey === "" ? "<root>" : pathKey;
+  }
+
+  function notifySettledPaths(changedPathKeys: Iterable<string>) {
+    pendingNotificationBatches.push(new Set(changedPathKeys));
+
+    if (isDispatchingNotifications) {
+      return;
+    }
+
+    isDispatchingNotifications = true;
+
+    try {
+      for (
+        let index = 0;
+        index < pendingNotificationBatches.length;
+        index += 1
+      ) {
+        notifyChangedPaths(listenersByPath, pendingNotificationBatches[index]);
+      }
+    } finally {
+      pendingNotificationBatches.length = 0;
+      isDispatchingNotifications = false;
+    }
+
+    flushDeferredWrites();
+  }
+
+  function notifyLegacyPath(pathKey: string) {
+    isDispatchingNotifications = true;
+
+    try {
+      if (pathKey === "") {
+        notifyAll(listenersByPath);
+      } else {
+        notifyPrefixes(listenersByPath, pathKey);
+      }
+    } finally {
+      isDispatchingNotifications = false;
+    }
+
+    flushDeferredWrites();
+  }
+
+  function flushDeferredWrites() {
+    if (isFlushingDeferredWrites) {
+      return;
+    }
+
+    isFlushingDeferredWrites = true;
+
+    try {
+      for (let index = 0; index < deferredWrites.length; index += 1) {
+        deferredWrites[index]();
+      }
+    } finally {
+      deferredWrites.length = 0;
+      isFlushingDeferredWrites = false;
+    }
   }
 
   function createPathIndexNode(): PathIndexNode {

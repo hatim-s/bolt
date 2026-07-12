@@ -31,3 +31,14 @@ updaters, and no-op writes. Every pass validates final values, notification
 counts, old snapshots, untouched sibling identity, and a deterministic checksum.
 Timing never gates tests: compare medians from the same machine and treat p95 as
 noise evidence, not a release threshold.
+
+## Derived graph benchmarks
+
+```sh
+bun run bench:derived:json
+```
+
+This records three measured passes after one warmup at 1,024, 2,048, and 4,096
+nodes. It covers index-only independent registration plus chain and wide-fan-out
+settlement. The matching stress suite asserts each affected derived node computes
+exactly once, so timings are evidence rather than the correctness gate.

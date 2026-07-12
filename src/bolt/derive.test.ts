@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test } from "vitest";
 import { createBoltStore, type BoltStoreApi } from "./bolt";
 
 type TestState = {
@@ -242,10 +242,12 @@ describe("Bolt derived paths", () => {
 
     rejectingStore.derive("node.value", ["a"], ({ get }) => get("a") * 2);
 
-    expect(() => rejectingStore.set("node", { value: 99, other: 1 })).toThrow(
+    expect(() =>
+      rejectingStore.set("node" as never, { value: 99, other: 1 } as never),
+    ).toThrow(
       'Bolt derived target "node.value" cannot be set directly.',
     );
-    expect(() => rejectingStore.set("node.value.extra" as never, 1)).toThrow(
+    expect(() => rejectingStore.set("node.value.extra" as never, 1 as never)).toThrow(
       'Bolt derived target "node.value" cannot be set directly.',
     );
 
@@ -316,21 +318,21 @@ describe("Bolt derived paths", () => {
         store.derive("z", [], () => 1);
         return 2;
       }),
-    ).toThrow("Bolt derive() cannot be called inside a derived compute.");
+    ).toThrow("Bolt derive() cannot be called inside a derived callback.");
 
     expect(() =>
       store.derive("b", ["a"], () => {
         dispose?.();
         return 2;
       }),
-    ).toThrow("Bolt derived disposers cannot run inside a derived compute.");
+    ).toThrow("Bolt derived disposers cannot run inside a derived callback.");
 
     expect(() =>
       store.derive("b", ["a"], () => {
         store.set("z", 1);
         return 2;
       }),
-    ).toThrow("Bolt derived compute functions cannot call set().");
+    ).toThrow("Bolt derived callbacks cannot call set().");
 
     store.set("a", 2);
     expect(store.get("b")).toBe(0);
@@ -364,7 +366,7 @@ describe("Bolt derived paths", () => {
   test("keeps the base store interface mock-compatible", () => {
     const fake: BoltStoreApi<{ count: number }> = {
       getState: () => ({ count: 0 }),
-      get: (() => 0) as BoltStoreApi<{ count: number }>["get"],
+      get: (() => ({ count: 0 })) as unknown as BoltStoreApi<{ count: number }>["get"],
       set: () => {},
       subscribe: () => () => {},
     };

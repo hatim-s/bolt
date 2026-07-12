@@ -161,9 +161,11 @@ so downstream derived paths and subscribers stay in sync.
 
 Cycles are invalid. A target cannot derive from itself, one of its parents, one
 of its descendants, an overlapping derived target, or an indirect dependency
-chain that points back to it. Derived compute functions are synchronous and
-should only return the next target value; async jobs, effects, nested `set`
-calls, graph mutation, and multi-target writes belong outside this v1 primitive.
+chain that points back to it. Derived compute and equality callbacks are
+synchronous and should only return a value or comparison result; async jobs,
+effects, nested `set` calls, graph mutation, and multi-target writes belong
+outside this v1 primitive. A write triggered by a subscriber is queued until
+every subscriber has observed the settled transaction that triggered it.
 
 Source paths are type checked. For generated systems that only know paths at
 runtime, use the explicit escape hatch:
@@ -193,6 +195,8 @@ Bolt indexes listeners by path: a nested write wakes the root, the written path,
 and its prefixes—not unrelated subscriptions. Direct path writes clone only the
 ancestor chain. Run `bun run bench:immutable` for machine-specific medians and
 p95 values across leaf, deep, mutation-style updater, and no-op workloads.
+Run `bun run bench:derived` for 1K/2K/4K independent-registration, chain, and
+wide-fan-out graph measurements.
 
 ## How it works
 

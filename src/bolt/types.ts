@@ -262,6 +262,21 @@ export type BoltDeriveCompute<TState extends object, TValue> = (
   context: BoltDerivedContext<TState, TValue>,
 ) => TValue;
 
+/**
+ * Runtime-path context used by deriveUnsafe. It deliberately gives up static
+ * path inference while retaining the rest of the settled-transaction context.
+ */
+export type BoltUnsafeDerivedContext<TState extends object> = Omit<
+  BoltDerivedContext<TState, unknown>,
+  "get"
+> & {
+  get: (path?: BoltRuntimePath) => unknown;
+};
+
+export type BoltUnsafeDeriveCompute<TState extends object> = (
+  context: BoltUnsafeDerivedContext<TState>,
+) => unknown;
+
 export type BoltDerive<TState extends object> = <
   TargetPath extends BoltPath<TState>,
 >(
@@ -274,7 +289,7 @@ export type BoltDerive<TState extends object> = <
 export type BoltUnsafeDerive<TState extends object> = (
   targetPath: BoltRuntimePath,
   sourcePaths: readonly BoltRuntimePath[],
-  compute: BoltDeriveCompute<TState, unknown>,
+  compute: BoltUnsafeDeriveCompute<TState>,
   options?: BoltDeriveOptions<unknown>,
 ) => () => void;
 
