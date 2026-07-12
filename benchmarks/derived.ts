@@ -17,10 +17,14 @@ function median(values: readonly number[]) {
   return sorted[Math.floor(sorted.length / 2)];
 }
 
-function measure(workload: string, size: number, run: () => void): Sample {
+function measure(workload: string, size: number, run: () => number | void): Sample {
   const start = performance.now();
-  run();
-  return { durationMs: performance.now() - start, size, workload };
+  const reportedDuration = run();
+  return {
+    durationMs: reportedDuration ?? performance.now() - start,
+    size,
+    workload,
+  };
 }
 
 function registerIndependent(size: number) {
@@ -64,11 +68,15 @@ function settleChain(size: number) {
     );
   }
 
+  const start = performance.now();
   store.set("node0", 1);
+  const durationMs = performance.now() - start;
 
   if (store.get(`node${size}`) !== size + 1) {
     throw new Error("chain did not settle");
   }
+
+  return durationMs;
 }
 
 function settleWideFanout(size: number) {
@@ -89,17 +97,124 @@ function settleWideFanout(size: number) {
     );
   }
 
+  const start = performance.now();
   store.set("source", 1);
+  const durationMs = performance.now() - start;
 
   if (store.get(`target${size - 1}`) !== size) {
     throw new Error("fan-out did not settle");
   }
+
+  return durationMs;
+}
+
+function registerReverseChain(size: number) {
+  const initial: Record<string, number> = {};
+
+  for (let index = 0; index <= size; index += 1) {
+    initial[`reverse${index}`] = 0;
+  }
+
+  const store = createBoltStore(initial);
+  const start = performance.now();
+
+  for (let index = size - 1; index >= 0; index -= 1) {
+    const source = `reverse${index + 1}`;
+    store.deriveUnsafe(
+      `reverse${index}`,
+      [source],
+      ({ get }) => Number(get(source)) + 1,
+      { initialize: false },
+    );
+  }
+  const durationMs = performance.now() - start;
+
+  store.set(`reverse${size}`, 1);
+
+  if (store.get("reverse0") !== size + 1) {
+    throw new Error("reverse chain did not settle");
+  }
+
+  return durationMs;
+}
+
+function disposeIndependentAndReregister(size: number) {
+  const initial: Record<string, number> = {};
+
+  for (let index = 0; index < size; index += 1) {
+    initial[`source${index}`] = 0;
+    initial[`target${index}`] = 0;
+  }
+
+  const store = createBoltStore(initial);
+  const registerAll = () =>
+    Array.from({ length: size }, (_, index) => {
+      const source = `source${index}`;
+      return store.deriveUnsafe(
+        `target${index}`,
+        [source],
+        ({ get }) => Number(get(source)) + 1,
+        { initialize: false },
+      );
+    });
+  const disposers = registerAll();
+  const start = performance.now();
+  disposers.forEach((dispose) => dispose());
+  const replacements = registerAll();
+  const durationMs = performance.now() - start;
+
+  store.set("source0", 1);
+
+  if (store.get("target0") !== 2) {
+    throw new Error("independent target did not re-register");
+  }
+
+  replacements.forEach((dispose) => dispose());
+  return durationMs;
+}
+
+function disposeShortChainAndReregister(size: number) {
+  const initial: Record<string, number> = {};
+
+  for (let index = 0; index <= size; index += 1) {
+    initial[`short${index}`] = 0;
+  }
+
+  const store = createBoltStore(initial);
+  const registerChain = () =>
+    Array.from({ length: size }, (_, offset) => {
+      const index = offset + 1;
+      const source = `short${index - 1}`;
+      return store.deriveUnsafe(
+        `short${index}`,
+        [source],
+        ({ get }) => Number(get(source)) + 1,
+        { initialize: false },
+      );
+    });
+  const disposers = registerChain();
+  const start = performance.now();
+  disposers.forEach((dispose) => dispose());
+  const replacements = registerChain();
+  const durationMs = performance.now() - start;
+
+  store.set("short0", 1);
+
+  if (store.get(`short${size}`) !== size + 1) {
+    throw new Error("short chain did not re-register");
+  }
+
+  replacements.forEach((dispose) => dispose());
+  return durationMs;
 }
 
 const workloads = [
   ["independent-registration", registerIndependent],
   ["chain-settlement", settleChain],
   ["wide-fanout-settlement", settleWideFanout],
+  ["reverse-chain-registration", registerReverseChain],
+  ["independent-dispose-reregister", disposeIndependentAndReregister],
+  ["short-chain-dispose-reregister", disposeShortChainAndReregister],
 ] as const;
 
 const samples: Sample[] = [];

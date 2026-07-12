@@ -160,6 +160,53 @@ describe("derived graph integration", () => {
     ]);
   });
 
+  test("discards deferred writes when a derived-graph subscriber throws", () => {
+    const store = createBoltStore({ a: 0, b: 0, derived: 0 });
+    let shouldThrow = true;
+
+    store.derive("derived", ["a"], ({ get }) => get("a") + 1);
+    store.subscribe(undefined, () => {
+      if (store.get("a") === 1) {
+        store.set("b", 2);
+      }
+    });
+    store.subscribe(undefined, () => {
+      if (shouldThrow) {
+        shouldThrow = false;
+        throw new Error("derived listener failure");
+      }
+    });
+
+    expect(() => store.set("a", 1)).toThrow("derived listener failure");
+    expect(store.getState()).toEqual({ a: 1, b: 0, derived: 2 });
+
+    store.set("a", 2);
+    expect(store.getState()).toEqual({ a: 2, b: 0, derived: 3 });
+  });
+
+  test("discards deferred writes when a legacy subscriber throws", () => {
+    const store = createBoltStore({ a: 0, b: 0 });
+    let shouldThrow = true;
+
+    store.subscribe(undefined, () => {
+      if (store.get("a") === 1) {
+        store.set("b", 2);
+      }
+    });
+    store.subscribe(undefined, () => {
+      if (shouldThrow) {
+        shouldThrow = false;
+        throw new Error("legacy listener failure");
+      }
+    });
+
+    expect(() => store.set("a", 1)).toThrow("legacy listener failure");
+    expect(store.getState()).toEqual({ a: 1, b: 0 });
+
+    store.set("a", 2);
+    expect(store.getState()).toEqual({ a: 2, b: 0 });
+  });
+
   test("cleans up disposed upstream, middle, and diamond edges before target re-registration", () => {
     const store = createBoltStore({ a: 1, b: 0, c: 0, d: 0 });
     const disposeB = store.derive("b", ["a"], ({ get }) => get("a") + 1);

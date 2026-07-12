@@ -166,6 +166,8 @@ synchronous and should only return a value or comparison result; async jobs,
 effects, nested `set` calls, graph mutation, and multi-target writes belong
 outside this v1 primitive. A write triggered by a subscriber is queued until
 every subscriber has observed the settled transaction that triggered it.
+If a subscriber throws, writes queued by that failed notification transaction
+are discarded rather than replayed after a later unrelated update.
 
 Source paths are type checked. For generated systems that only know paths at
 runtime, use the explicit escape hatch:

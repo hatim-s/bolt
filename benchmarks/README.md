@@ -39,6 +39,7 @@ bun run bench:derived:json
 ```
 
 This records three measured passes after one warmup at 1,024, 2,048, and 4,096
-nodes. It covers index-only independent registration plus chain and wide-fan-out
-settlement. The matching stress suite asserts each affected derived node computes
+nodes. It covers independent registration, forward and reverse chains,
+wide-fan-out settlement, and independent/short-chain dispose-and-reregister
+workloads. The matching stress suite asserts each affected derived node computes
 exactly once, so timings are evidence rather than the correctness gate.

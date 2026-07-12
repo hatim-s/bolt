@@ -228,6 +228,7 @@ function createInternalBoltStore<TState extends object>(
   const sourceIndexRoot = createPathIndexNode();
   const targetIndexRoot = createPathIndexNode();
   const downstreamByNodeId = new Map<number, Set<number>>();
+  const upstreamByNodeId = new Map<number, Set<number>>();
   let nextDerivedId = 1;
   let derivedExecutionDepth = 0;
   let isDispatchingNotifications = false;
@@ -448,8 +449,8 @@ function createInternalBoltStore<TState extends object>(
     const previousState = state;
 
     try {
-      registerDerivedNode(node);
-      validateNewDerivedNode(node);
+      const topology = registerDerivedNode(node);
+      validateNewDerivedNode(node, topology);
 
       if (options?.initialize !== false) {
         const changedPathKeys = new Set<string>();
@@ -574,6 +575,7 @@ function createInternalBoltStore<TState extends object>(
     }
 
     downstreamByNodeId.set(node.id, new Set());
+    upstreamByNodeId.set(node.id, new Set());
 
     for (const producerId of producerIds) {
       addDownstreamEdge(producerId, node.id);
@@ -582,6 +584,8 @@ function createInternalBoltStore<TState extends object>(
     for (const consumerId of consumerIds) {
       addDownstreamEdge(node.id, consumerId);
     }
+
+    return { consumerIds, producerIds };
   }
 
   function unregisterDerivedNode(node: DerivedNode<TState>) {
@@ -593,32 +597,41 @@ function createInternalBoltStore<TState extends object>(
       removePathIndexNode(sourceIndexRoot, sourcePathKey, node.id);
     }
 
-    downstreamByNodeId.delete(node.id);
-
-    for (const downstreamIds of downstreamByNodeId.values()) {
-      downstreamIds.delete(node.id);
+    for (const producerId of upstreamByNodeId.get(node.id) ?? []) {
+      downstreamByNodeId.get(producerId)?.delete(node.id);
     }
+
+    for (const consumerId of downstreamByNodeId.get(node.id) ?? []) {
+      upstreamByNodeId.get(consumerId)?.delete(node.id);
+    }
+
+    downstreamByNodeId.delete(node.id);
+    upstreamByNodeId.delete(node.id);
   }
 
-  function validateNewDerivedNode(node: DerivedNode<TState>) {
-    const seen = new Set<number>();
-
-    function visit(nodeId: number) {
-      for (const downstreamId of downstreamByNodeId.get(nodeId) ?? []) {
-        if (downstreamId === node.id) {
-          throw new Error(formatDerivedCycle(node.id));
-        }
-
-        if (seen.has(downstreamId)) {
-          continue;
-        }
-
-        seen.add(downstreamId);
-        visit(downstreamId);
-      }
+  function validateNewDerivedNode(
+    node: DerivedNode<TState>,
+    topology: { consumerIds: ReadonlySet<number>; producerIds: ReadonlySet<number> },
+  ) {
+    // A newly registered node can only close a cycle if it bridges an existing
+    // producer to an existing consumer. Pure forward or reverse chain growth
+    // has one empty side, so it is cycle-safe without walking the full suffix.
+    if (topology.producerIds.size === 0 || topology.consumerIds.size === 0) {
+      return;
     }
 
-    visit(node.id);
+    for (const consumerId of topology.consumerIds) {
+      for (const producerId of topology.producerIds) {
+        const path = findDownstreamPath(consumerId, producerId);
+
+        if (path) {
+          const formattedPath = [node.id, ...path, node.id]
+            .map((id) => formatPathKey(derivedNodes.get(id)?.targetPathKey ?? `${id}`))
+            .join(" -> ");
+          throw new Error(`Bolt derived cycle: ${formattedPath}`);
+        }
+      }
+    }
   }
 
   function topologicallySortDerivedNodes(nodes: readonly DerivedNode<TState>[]) {
@@ -743,43 +756,43 @@ function createInternalBoltStore<TState extends object>(
     }
 
     downstreamIds.add(dependentId);
-  }
+    let upstreamIds = upstreamByNodeId.get(dependentId);
 
-  function formatDerivedCycle(startId: number) {
-    const path: number[] = [startId];
-    const seen = new Set<number>(path);
-
-    function findCycle(nodeId: number): boolean {
-      for (const downstreamId of downstreamByNodeId.get(nodeId) ?? []) {
-        if (downstreamId === startId) {
-          path.push(downstreamId);
-          return true;
-        }
-
-        if (seen.has(downstreamId)) {
-          continue;
-        }
-
-        seen.add(downstreamId);
-        path.push(downstreamId);
-
-        if (findCycle(downstreamId)) {
-          return true;
-        }
-
-        path.pop();
-      }
-
-      return false;
+    if (!upstreamIds) {
+      upstreamIds = new Set();
+      upstreamByNodeId.set(dependentId, upstreamIds);
     }
 
-    findCycle(startId);
+    upstreamIds.add(producerId);
+  }
 
-    const formattedPath = path
-      .map((id) => formatPathKey(derivedNodes.get(id)?.targetPathKey ?? `${id}`))
-      .join(" -> ");
+  function findDownstreamPath(startId: number, targetId: number) {
+    const parents = new Map<number, number | undefined>([[startId, undefined]]);
+    const queue = [startId];
 
-    return `Bolt derived cycle: ${formattedPath}`;
+    for (let index = 0; index < queue.length; index += 1) {
+      const nodeId = queue[index];
+
+      if (nodeId === targetId) {
+        const path: number[] = [];
+
+        for (let cursor: number | undefined = nodeId; cursor !== undefined; ) {
+          path.push(cursor);
+          cursor = parents.get(cursor);
+        }
+
+        return path.reverse();
+      }
+
+      for (const downstreamId of downstreamByNodeId.get(nodeId) ?? []) {
+        if (!parents.has(downstreamId)) {
+          parents.set(downstreamId, nodeId);
+          queue.push(downstreamId);
+        }
+      }
+    }
+
+    return undefined;
   }
 
   function formatPathKey(pathKey: string) {
@@ -793,6 +806,7 @@ function createInternalBoltStore<TState extends object>(
       return;
     }
 
+    let completed = false;
     isDispatchingNotifications = true;
 
     try {
@@ -803,15 +817,26 @@ function createInternalBoltStore<TState extends object>(
       ) {
         notifyChangedPaths(listenersByPath, pendingNotificationBatches[index]);
       }
+      completed = true;
     } finally {
       pendingNotificationBatches.length = 0;
       isDispatchingNotifications = false;
+
+      if (!completed) {
+        // A listener may have queued writes before another listener throws.
+        // Those writes belong to the failed notification transaction and must
+        // never leak into a later, unrelated set().
+        deferredWrites.length = 0;
+      }
     }
 
-    flushDeferredWrites();
+    if (completed) {
+      flushDeferredWrites();
+    }
   }
 
   function notifyLegacyPath(pathKey: string) {
+    let completed = false;
     isDispatchingNotifications = true;
 
     try {
@@ -820,11 +845,18 @@ function createInternalBoltStore<TState extends object>(
       } else {
         notifyPrefixes(listenersByPath, pathKey);
       }
+      completed = true;
     } finally {
       isDispatchingNotifications = false;
+
+      if (!completed) {
+        deferredWrites.length = 0;
+      }
     }
 
-    flushDeferredWrites();
+    if (completed) {
+      flushDeferredWrites();
+    }
   }
 
   function flushDeferredWrites() {

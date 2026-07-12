@@ -64,4 +64,109 @@ describe("derived graph deterministic stress", () => {
     expect(store.get(`target${SCALE - 1}`)).toBe(SCALE);
     expect([...calls].every((count) => count === 1)).toBe(true);
   });
+
+  test("registers a reverse-ordered long chain and settles each target once", () => {
+    const initial: Record<string, number> = {};
+
+    for (let index = 0; index <= SCALE; index += 1) {
+      initial[`reverse${index}`] = 0;
+    }
+
+    const store = createBoltStore(initial);
+    const calls = new Uint8Array(SCALE);
+
+    for (let index = SCALE - 1; index >= 0; index -= 1) {
+      const target = `reverse${index}`;
+      const source = `reverse${index + 1}`;
+      store.deriveUnsafe(
+        target,
+        [source],
+        ({ get }) => {
+          calls[index] += 1;
+          return Number(get(source)) + 1;
+        },
+        { initialize: false },
+      );
+    }
+
+    store.set(`reverse${SCALE}`, 1);
+
+    expect(store.get("reverse0")).toBe(SCALE + 1);
+    expect([...calls].every((count) => count === 1)).toBe(true);
+  });
+
+  test("tears down and re-registers bulk independent targets without stale edges", () => {
+    const initial: Record<string, number> = {};
+
+    for (let index = 0; index < SCALE; index += 1) {
+      initial[`source${index}`] = 0;
+      initial[`target${index}`] = 0;
+    }
+
+    const store = createBoltStore(initial);
+    const calls = new Uint8Array(SCALE);
+    const registerAll = () =>
+      Array.from({ length: SCALE }, (_, index) => {
+        const source = `source${index}`;
+        return store.deriveUnsafe(
+          `target${index}`,
+          [source],
+          ({ get }) => {
+            calls[index] += 1;
+            return Number(get(source)) + 1;
+          },
+          { initialize: false, manualWrites: "allow" },
+        );
+      });
+
+    const disposers = registerAll();
+    disposers.forEach((dispose) => dispose());
+    const replacements = registerAll();
+
+    const nextState = { ...store.getState() };
+
+    for (let index = 0; index < SCALE; index += 1) {
+      nextState[`source${index}`] = 1;
+    }
+
+    store.set("", nextState);
+
+    expect([...calls].every((count) => count === 1)).toBe(true);
+    expect(store.get(`target${SCALE - 1}`)).toBe(2);
+    replacements.forEach((dispose) => dispose());
+  });
+
+  test("tears down and re-registers a short chain without stale producer links", () => {
+    const chainLength = 512;
+    const initial: Record<string, number> = {};
+
+    for (let index = 0; index <= chainLength; index += 1) {
+      initial[`short${index}`] = 0;
+    }
+
+    const store = createBoltStore(initial);
+    const calls = new Uint8Array(chainLength);
+    const registerChain = () =>
+      Array.from({ length: chainLength }, (_, offset) => {
+        const index = offset + 1;
+        const source = `short${index - 1}`;
+        return store.deriveUnsafe(
+          `short${index}`,
+          [source],
+          ({ get }) => {
+            calls[offset] += 1;
+            return Number(get(source)) + 1;
+          },
+          { initialize: false },
+        );
+      });
+
+    const disposers = registerChain();
+    disposers.forEach((dispose) => dispose());
+    registerChain();
+    store.set("short0", 1);
+
+    expect(store.get(`short${chainLength}`)).toBe(chainLength + 1);
+    expect([...calls].every((count) => count === 1)).toBe(true);
+  });
 });
