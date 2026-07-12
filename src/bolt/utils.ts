@@ -3,77 +3,127 @@
  * listener dispatch.
  */
 import get from "lodash/get";
-import set from "lodash/set";
+import { create } from "mutative";
 import type { BoltRuntimePath, Listener } from "./types";
 
-/**
- * Reads a path from any object-like value.
- *
- * Missing intermediate values return undefined instead of throwing, matching
- * lodash-style path access.
- */
 export function readPath(value: unknown, segments: readonly string[]) {
-  // Empty segment list represents the whole store, so return the input as-is.
   return segments.length === 0 ? value : get(value, segments);
 }
 
 /**
- * Writes a value into a Mutative draft at the provided path.
- *
- * Missing intermediate branches are created as objects or arrays based on the
- * next path segment, which lets set("a.0.b", value) build an array at a.
+ * Replaces a nested value without mutating the current snapshot. Direct path
+ * writes copy only the root and the containers on the written path.
  */
-export function writePath(
-  draft: unknown,
+export function writeImmutablePath<TState>(
+  root: TState,
   segments: readonly string[],
   valueOrUpdater: unknown,
-) {
-  // Read before writing so updater functions receive the current path value.
-  const previousValue = get(draft, segments);
-  const nextValue = resolveValue(valueOrUpdater, previousValue);
+  resolveUpdater = true,
+): TState {
+  assertSafePathSegments(segments);
 
-  // Mutative gives us a mutable draft. lodash/set performs the nested write and
-  // creates missing object/array containers using lodash's path rules.
-  set(draft as object, segments, nextValue);
+  const previousValue = readOwnPath(root, segments);
+  const leafExists = hasPath(root, segments);
+  const nextValue = resolveImmutableValue(
+    valueOrUpdater,
+    previousValue,
+    resolveUpdater,
+  );
+
+  if (leafExists && Object.is(previousValue, nextValue)) {
+    return root;
+  }
+
+  const nextRoot = cloneContainer(root) as TState;
+  let previousCursor: unknown = root;
+  let nextCursor = nextRoot as Indexable;
+
+  for (let index = 0; index < segments.length - 1; index += 1) {
+    const segment = segments[index];
+    const nextSegment = segments[index + 1];
+    const previousChild = readOwnProperty(previousCursor, segment);
+    const nextChild = isPathContainer(previousChild)
+      ? cloneContainer(previousChild)
+      : createContainerForSegment(nextSegment);
+
+    defineOwnValue(nextCursor, segment, nextChild);
+    previousCursor = previousChild;
+    nextCursor = nextChild as Indexable;
+  }
+
+  defineOwnValue(nextCursor, segments[segments.length - 1], nextValue);
+  return nextRoot;
 }
 
-/**
- * Applies direct values and updater functions with the same set API.
- */
 export function resolveValue(valueOrUpdater: unknown, previousValue: unknown) {
-  // Treat functions as updater callbacks; all other inputs are direct values.
   return typeof valueOrUpdater === "function"
     ? (valueOrUpdater as (previous: unknown) => unknown)(previousValue)
     : valueOrUpdater;
 }
 
 /**
- * Notifies listeners for the root and every prefix of one updated path.
- *
- * For a.b.c, Bolt wakes "", "a", "a.b", and "a.b.c" only.
+ * Runs object updaters through Mutative's lazy copy-on-write draft. Graphs
+ * that cannot retain Bolt's snapshot guarantees are rejected before the
+ * callback is invoked; callers can always replace those values directly.
  */
+export function resolveImmutableValue(
+  valueOrUpdater: unknown,
+  previousValue: unknown,
+  resolveUpdater = true,
+) {
+  if (!resolveUpdater || typeof valueOrUpdater !== "function") {
+    return valueOrUpdater;
+  }
+
+  if (!isDraftable(previousValue)) {
+    if (isObject(previousValue)) {
+      throw new TypeError(
+        `Bolt cannot safely draft ${describeValue(previousValue)}; use a direct replacement instead.`,
+      );
+    }
+
+    return (valueOrUpdater as (previous: unknown) => unknown)(previousValue);
+  }
+
+  const graph = inspectDraftGraph(previousValue);
+
+  if (graph.unsupported) {
+    throw new TypeError(
+      `Bolt cannot safely draft ${graph.unsupported}; use a direct replacement instead.`,
+    );
+  }
+
+  if (graph.hasAliasesOrCycles) {
+    throw new TypeError(
+      "Bolt cannot safely draft graphs with cycles or shared references; use a direct replacement instead.",
+    );
+  }
+
+  return create(
+    previousValue,
+    (draft) =>
+      (valueOrUpdater as (previous: unknown) => unknown)(draft) as
+        | object
+        | void,
+    { strict: true },
+  );
+}
+
 export function notifyPrefixes(
   listenersByPath: Map<string, Set<Listener>>,
   pathKey: string,
 ) {
-  // The whole-store subscriber always sees every nested write.
   notifyPath(listenersByPath, "");
 
   let prefix = "";
 
   for (const segment of splitPathKey(pathKey)) {
-    // Grow one prefix per segment: a -> a.b -> a.b.c.
     prefix = prefix ? `${prefix}.${segment}` : segment;
     notifyPath(listenersByPath, prefix);
   }
 }
 
-/**
- * Notifies every unique listener after a whole-store replacement.
- */
 export function notifyAll(listenersByPath: Map<string, Set<Listener>>) {
-  // A listener can be subscribed to multiple paths. Deduplicate so root
-  // replacement calls each listener at most once.
   const listeners = new Set<Listener>();
 
   for (const pathListeners of listenersByPath.values()) {
@@ -85,58 +135,257 @@ export function notifyAll(listenersByPath: Map<string, Set<Listener>>) {
   listeners.forEach((listener) => listener());
 }
 
-/**
- * Converts all accepted path inputs into Bolt's canonical dot path key.
- */
 export function normalizePath(path?: BoltRuntimePath) {
-  // The normalized key is the Map key used for both subscriptions and reads.
   return toSegments(path).join(".");
 }
 
-/**
- * Splits Bolt's canonical dot path key back into segments.
- *
- * The empty string is reserved for the whole-store subscription and must remain
- * an empty segment list.
- */
 export function splitPathKey(pathKey: string) {
-  // pathKey.split(".") would return [""] for root, which would incorrectly
-  // read state[""] instead of the whole store.
   return pathKey === "" ? [] : pathKey.split(".");
 }
 
-/**
- * Notifies listeners registered for one exact canonical path key.
- */
+function assertSafePathSegments(segments: readonly string[]) {
+  for (const segment of segments) {
+    if (
+      segment === "__proto__" ||
+      segment === "prototype" ||
+      segment === "constructor"
+    ) {
+      throw new TypeError(`Unsafe Bolt path segment: ${segment}`);
+    }
+  }
+}
+
 function notifyPath(
   listenersByPath: Map<string, Set<Listener>>,
   pathKey: string,
 ) {
   const listeners = listenersByPath.get(pathKey);
 
-  if (!listeners) {
-    // No subscribers for this exact path, so dispatch is a no-op.
-    return;
+  if (listeners) {
+    [...listeners].forEach((listener) => listener());
   }
-
-  // Copy before iterating so unsubscribe calls during notification cannot
-  // mutate the Set being traversed.
-  [...listeners].forEach((listener) => listener());
 }
 
-/**
- * Converts external path input into string segments before canonicalization.
- *
- * Numeric array segments are stringified so ["items", 0, "name"] and
- * "items.0.name" share the same listener bucket.
- */
 function toSegments(path?: BoltRuntimePath) {
   if (!path) {
-    // undefined and "" both mean "the root store".
     return [];
   }
 
-  // String paths are already dot-delimited. Array paths preserve caller-provided
-  // segment boundaries, then stringify numeric segments for canonical keys.
   return typeof path === "string" ? path.split(".") : path.map(String);
+}
+
+type Indexable = Record<string, unknown>;
+
+function cloneContainer(value: unknown): unknown[] | Indexable {
+  if (!isPathContainer(value)) {
+    throw new TypeError(
+      `Bolt cannot safely traverse ${describeValue(value as object)}; replace it directly instead.`,
+    );
+  }
+
+  const clone: object = Array.isArray(value)
+    ? new Array(value.length)
+    : Object.create(Object.getPrototypeOf(value));
+
+  for (const property of Reflect.ownKeys(value)) {
+    if (Array.isArray(value) && property === "length") {
+      continue;
+    }
+
+    const descriptor = Object.getOwnPropertyDescriptor(value, property);
+
+    if (descriptor) {
+      Object.defineProperty(clone, property, descriptor);
+    }
+  }
+
+  return clone as unknown[] | Indexable;
+}
+
+function createContainerForSegment(segment: string) {
+  return isArrayIndex(segment) ? [] : {};
+}
+
+function readOwnPath(value: unknown, segments: readonly string[]) {
+  let cursor = value;
+
+  for (const segment of segments) {
+    cursor = readOwnProperty(cursor, segment);
+  }
+
+  return cursor;
+}
+
+function readOwnProperty(value: unknown, property: string): unknown {
+  if (!isIndexable(value) || !Object.hasOwn(value, property)) {
+    return undefined;
+  }
+
+  const descriptor = Object.getOwnPropertyDescriptor(value, property);
+
+  if (!descriptor || !("value" in descriptor)) {
+    throw new TypeError(
+      `Bolt cannot safely traverse accessor property ${property}; replace its owning value directly instead.`,
+    );
+  }
+
+  return descriptor.value;
+}
+
+function defineOwnValue(target: Indexable, property: string, value: unknown) {
+  const descriptor = Object.getOwnPropertyDescriptor(target, property);
+
+  if (!descriptor) {
+    Object.defineProperty(target, property, {
+      configurable: true,
+      enumerable: true,
+      value,
+      writable: true,
+    });
+    return;
+  }
+
+  if (!("value" in descriptor) || (!descriptor.writable && !descriptor.configurable)) {
+    throw new TypeError(
+      `Bolt cannot safely write non-writable or accessor property ${property}; replace its owning value directly instead.`,
+    );
+  }
+
+  Object.defineProperty(target, property, { ...descriptor, value });
+}
+
+function hasPath(value: unknown, segments: readonly string[]) {
+  let cursor = value;
+
+  for (const segment of segments) {
+    if (!isIndexable(cursor) || !Object.hasOwn(cursor, segment)) {
+      return false;
+    }
+
+    cursor = readOwnProperty(cursor, segment);
+  }
+
+  return true;
+}
+
+function isIndexable(value: unknown): value is Indexable {
+  return isObject(value);
+}
+
+function isDraftable(value: unknown): value is object {
+  return Array.isArray(value) || value instanceof Map || value instanceof Set || isPlainObject(value);
+}
+
+function isPathContainer(value: unknown): value is object {
+  return Array.isArray(value) || isPlainObject(value) || isSupportedClassInstance(value);
+}
+
+function isSupportedClassInstance(value: unknown): value is object {
+  if (!isObject(value) || isPlainObject(value) || Array.isArray(value)) {
+    return false;
+  }
+
+  return !isUnsupportedAtomicObject(value);
+}
+
+function isUnsupportedAtomicObject(value: object) {
+  return (
+    value instanceof Map ||
+    value instanceof Set ||
+    value instanceof Date ||
+    value instanceof RegExp ||
+    ArrayBuffer.isView(value) ||
+    value instanceof ArrayBuffer ||
+    value instanceof Promise ||
+    value instanceof WeakMap ||
+    value instanceof WeakSet
+  );
+}
+
+function describeValue(value: object) {
+  return value.constructor?.name || "object";
+}
+
+function inspectDraftGraph(root: object): {
+  hasAliasesOrCycles: boolean;
+  unsupported?: string;
+} {
+  const visited = new WeakSet<object>();
+  const visiting = new WeakSet<object>();
+  let hasAliasesOrCycles = false;
+  let unsupported: string | undefined;
+
+  function visit(value: unknown) {
+    if (!isObject(value) || unsupported) {
+      return;
+    }
+
+    if (
+      ((isUnsupportedAtomicObject(value) &&
+        !(value instanceof Map) &&
+        !(value instanceof Set)) ||
+        isSupportedClassInstance(value))
+    ) {
+      unsupported = describeValue(value);
+      return;
+    }
+
+    if (visiting.has(value) || visited.has(value)) {
+      hasAliasesOrCycles = true;
+      return;
+    }
+
+    visiting.add(value);
+
+    const objectValue = value as object;
+
+    if (objectValue instanceof Map) {
+      for (const [key, childValue] of objectValue) {
+        visit(key);
+        visit(childValue);
+      }
+    } else if (objectValue instanceof Set) {
+      for (const childValue of objectValue) {
+        visit(childValue);
+      }
+    } else {
+      for (const property of Reflect.ownKeys(objectValue)) {
+        if (Array.isArray(objectValue) && property === "length") {
+          continue;
+        }
+
+        const descriptor = Object.getOwnPropertyDescriptor(objectValue, property);
+
+        if (!descriptor || !("value" in descriptor)) {
+          unsupported = "an accessor property";
+          return;
+        }
+
+        visit(descriptor.value);
+      }
+    }
+
+    visiting.delete(value);
+    visited.add(value);
+  }
+
+  visit(root);
+  return { hasAliasesOrCycles, unsupported };
+}
+
+function isPlainObject(value: unknown): value is Indexable {
+  if (!isObject(value) || Array.isArray(value)) {
+    return false;
+  }
+
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function isObject(value: unknown): value is object {
+  return typeof value === "object" && value !== null;
+}
+
+function isArrayIndex(segment: string) {
+  return /^(0|[1-9]\d*)$/.test(segment);
 }

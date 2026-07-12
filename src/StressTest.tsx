@@ -12,7 +12,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { createBolt } from "bolt";
+import { createBolt } from "./bolt";
 import { useStore } from "zustand";
 import { createStore, type StoreApi } from "zustand/vanilla";
 

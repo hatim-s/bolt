@@ -43,11 +43,19 @@
     "publish:dry": "npm publish --dry-run --access public",
     "publish:from-main": "bash scripts/publish.sh",
     "publish:package": "bash scripts/publish.sh",
+    "test": "vitest run --config vitest.config.ts",
+    "test:typecheck": "tsc -p tsconfig.test.json",
+    "test:watch": "vitest --config vitest.config.ts",
+    "test:coverage": "vitest run --config vitest.config.ts --coverage",
+    "test:stress": "vitest run --config vitest.stress.config.ts",
+    "bench:immutable": "bun benchmarks/run.ts",
+    "bench:immutable:json": "bun benchmarks/run.ts --json artifacts/benchmarks/immutable.json",
+    "verify": "bun run test:typecheck && bun run test && bun run test:stress && bun run build",
     "preview": "vite preview --host 0.0.0.0 --outDir dist-playground"
   },
   "dependencies": {
     "lodash": "^4.18.1",
-    "mutative": "^1.3.0"
+    "mutative": "1.3.0"
   },
   "peerDependencies": {
     "react": ">=18.0.0"
@@ -58,11 +66,15 @@
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.2",
+    "@vitest/coverage-v8": "4.1.10",
+    "bun-types": "1.3.9",
+    "fast-check": "4.9.0",
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
     "tailwindcss": "^4.3.0",
     "typescript": "^6.0.3",
     "vite": "^8.0.13",
+    "vitest": "4.1.10",
     "zustand": "^5.0.14"
   }
 }
