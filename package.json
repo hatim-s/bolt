@@ -50,6 +50,8 @@
     "test:stress": "vitest run --config vitest.stress.config.ts",
     "bench:immutable": "bun benchmarks/run.ts",
     "bench:immutable:json": "bun benchmarks/run.ts --json artifacts/benchmarks/immutable.json",
+    "bench:derived": "bun benchmarks/derived.ts",
+    "bench:derived:json": "bun benchmarks/derived.ts --json artifacts/benchmarks/derived.json",
     "verify": "bun run test:typecheck && bun run test && bun run test:stress && bun run build",
     "preview": "vite preview --host 0.0.0.0 --outDir dist-playground"
   },

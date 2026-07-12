@@ -204,6 +204,95 @@ export type BoltValueOrUpdater<T> = T | ((previous: T) => T);
  */
 export type BoltBoundSet<T> = (valueOrUpdater: BoltValueOrUpdater<T>) => void;
 
+export type BoltDeriveOptions<TValue> = {
+  /**
+   * Compares the previous target value and the next computed value.
+   */
+  equality?: (previous: TValue, next: TValue) => boolean;
+
+  /**
+   * Computes and writes the derived target immediately when registered.
+   *
+   * Defaults to true.
+   */
+  initialize?: boolean;
+
+  /**
+   * Controls normal set() calls aimed at the derived target.
+   *
+   * Defaults to "reject" so manual writes and derived writes do not silently
+   * fight over one path.
+   */
+  manualWrites?: "reject" | "allow";
+};
+
+export type BoltDerivedContext<TState extends object, TValue> = {
+  /**
+   * Reads the current post-write state without subscribing.
+   */
+  get: BoltStoreApi<TState>["get"];
+
+  /**
+   * Returns the current root state object.
+   */
+  getState: () => TState;
+
+  /**
+   * Target value before this compute writes.
+   */
+  previous: TValue;
+
+  /**
+   * Normalized dot path for the derived target.
+   */
+  targetPath: string;
+
+  /**
+   * Normalized dot paths for the declared sources.
+   */
+  sourcePaths: readonly string[];
+
+  /**
+   * Normalized paths already changed in the current write transaction.
+   */
+  changedPaths: readonly string[];
+};
+
+export type BoltDeriveCompute<TState extends object, TValue> = (
+  context: BoltDerivedContext<TState, TValue>,
+) => TValue;
+
+/**
+ * Runtime-path context used by deriveUnsafe. It deliberately gives up static
+ * path inference while retaining the rest of the settled-transaction context.
+ */
+export type BoltUnsafeDerivedContext<TState extends object> = Omit<
+  BoltDerivedContext<TState, unknown>,
+  "get"
+> & {
+  get: (path?: BoltRuntimePath) => unknown;
+};
+
+export type BoltUnsafeDeriveCompute<TState extends object> = (
+  context: BoltUnsafeDerivedContext<TState>,
+) => unknown;
+
+export type BoltDerive<TState extends object> = <
+  TargetPath extends BoltPath<TState>,
+>(
+  targetPath: TargetPath,
+  sourcePaths: readonly BoltPath<TState>[],
+  compute: BoltDeriveCompute<TState, BoltPathValue<TState, TargetPath>>,
+  options?: BoltDeriveOptions<BoltPathValue<TState, TargetPath>>,
+) => () => void;
+
+export type BoltUnsafeDerive<TState extends object> = (
+  targetPath: BoltRuntimePath,
+  sourcePaths: readonly BoltRuntimePath[],
+  compute: BoltUnsafeDeriveCompute<TState>,
+  options?: BoltDeriveOptions<unknown>,
+) => () => void;
+
 /**
  * Framework-independent store API.
  *
@@ -238,6 +327,19 @@ export type BoltStoreApi<TState extends object> = {
   subscribe: (path: BoltRuntimePath | undefined, listener: Listener) => () => void;
 };
 
+export type BoltDerivedStoreApi<TState extends object> = BoltStoreApi<TState> & {
+  /**
+   * Materializes one path from other paths. Source writes settle derived targets
+   * before subscribers are notified.
+   */
+  derive: BoltDerive<TState>;
+
+  /**
+   * Untyped escape hatch for dynamic path sources.
+   */
+  deriveUnsafe: BoltUnsafeDerive<TState>;
+};
+
 /**
  * React hook overload for reading either the full state or one path value.
  */
@@ -267,7 +369,7 @@ export type BoltReactApi<TState extends object> = {
   /**
    * Hook for imperative store access.
    */
-  useApi: () => BoltStoreApi<TState>;
+  useApi: () => BoltDerivedStoreApi<TState>;
 
   /**
    * Hook for the typed set function.
@@ -283,9 +385,9 @@ export type BoltReactApi<TState extends object> = {
 /**
  * Internal extension used by useSyncExternalStore.
  *
- * Public callers get the smaller BoltStoreApi surface from useApi.
+ * Public callers get the derived-capable store surface from useApi.
  */
-export type InternalBoltStore<TState extends object> = BoltStoreApi<TState> & {
+export type InternalBoltStore<TState extends object> = BoltDerivedStoreApi<TState> & {
   /**
    * Reads a path after it has already been normalized to a dot key.
    */

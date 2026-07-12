@@ -106,6 +106,78 @@ useStore();                                 // no path = whole store
 
 Paths and `set` values are type-checked from your state, up to 6 levels deep.
 
+## Derived paths
+
+`derive(target, sources, compute)` materializes one path from other typed paths.
+The target behaves like normal store state: `get`, `useStore`, and `subscribe`
+all read it at the same path, and Bolt updates it before subscribers are
+notified.
+
+```tsx
+const { Provider, useApi, useStore } = createBolt<State>();
+
+function RegisterTotal() {
+  const api = useApi();
+
+  useEffect(() => {
+    return api.derive(
+      "cart.total",
+      ["cart.items", "cart.discount"],
+      ({ get }) => {
+        const items = get("cart.items");
+        const discount = get("cart.discount") ?? 0;
+        return items.reduce((sum, item) => sum + item.price, 0) - discount;
+      },
+    );
+  }, [api]);
+
+  return null;
+}
+
+function Total() {
+  const [total] = useStore("cart.total");
+  return <span>{total}</span>;
+}
+```
+
+Derived targets can chain. If `b` derives from `a`, and `c` derives from `b`, a
+write to `a` recomputes `b` and then `c` before React gets notified.
+
+Manual writes that overlap a derived target are rejected by default so a normal
+`set` call does not silently fight the derivation. That includes writes to the
+target itself, one of its parents, or one of its descendants. Put local edits or
+overrides in a separate source path instead:
+
+```ts
+api.derive("node.value", ["input.value", "node.override"], ({ get }) => {
+  return get("node.override") ?? transform(get("input.value"));
+});
+```
+
+If you really want manual writes to the target, opt in with
+`{ manualWrites: "allow" }`. The next source change may overwrite that value.
+Bolt then treats overlapping manual writes as changes to the derived target too,
+so downstream derived paths and subscribers stay in sync.
+
+Cycles are invalid. A target cannot derive from itself, one of its parents, one
+of its descendants, an overlapping derived target, or an indirect dependency
+chain that points back to it. Derived compute and equality callbacks are
+synchronous and should only return a value or comparison result; async jobs,
+effects, nested `set` calls, graph mutation, and multi-target writes belong
+outside this v1 primitive. A write triggered by a subscriber is queued until
+every subscriber has observed the settled transaction that triggered it.
+If a subscriber throws, writes queued by that failed notification transaction
+are discarded rather than replayed after a later unrelated update.
+
+Source paths are type checked. For generated systems that only know paths at
+runtime, use the explicit escape hatch:
+
+```ts
+api.deriveUnsafe(dynamicTarget, dynamicSources, ({ get }) => {
+  return computeFromRuntimePaths(get);
+});
+```
+
 ## API
 
 | Member | What it does |
@@ -114,10 +186,10 @@ Paths and `set` values are type-checked from your state, up to 6 levels deep.
 | `useStore(path)` | Subscribe to a path and return `[value, setValue]`. The setter is already bound to that path. |
 | `useStore()` | Subscribe to the whole store and return its value. |
 | `useSet()` | Returns the typed `set(path, valueOrUpdater)`. |
-| `useApi()` | Imperative `{ get, set, getState, subscribe }` — no re-render. |
+| `useApi()` | Imperative `{ get, set, getState, subscribe, derive, deriveUnsafe }` — no re-render. |
 
 Need it without React (tests, vanilla code)? `createBoltStore(initialState)`
-gives you the same `get` / `set` / `subscribe`.
+gives you the same `get` / `set` / `subscribe` / `derive` / `deriveUnsafe`.
 
 ## It stays fast as the store grows
 
@@ -125,6 +197,8 @@ Bolt indexes listeners by path: a nested write wakes the root, the written path,
 and its prefixes—not unrelated subscriptions. Direct path writes clone only the
 ancestor chain. Run `bun run bench:immutable` for machine-specific medians and
 p95 values across leaf, deep, mutation-style updater, and no-op workloads.
+Run `bun run bench:derived` for 1K/2K/4K independent-registration, chain, and
+wide-fan-out graph measurements.
 
 ## How it works
 
@@ -144,12 +218,16 @@ shared references. Replace those values directly instead. Direct writes through
 plain, null-prototype, and simple class containers preserve own descriptors and
 prototypes; unsafe prototype path segments are rejected.
 
+Derived paths live in the same external store. When a write touches a derived
+source, Bolt settles the affected derived graph first, batches all changed paths,
+and then notifies each affected listener once.
+
 ## When *not* to reach for bolt
 
 Pick Zustand or Jotai if you want a mature, widely-audited library with a
 middleware ecosystem (`persist`, `devtools`, `immer`), transient updates, or
-derived/computed state. Bolt is young, has no middleware, and caps typed paths at
-6 levels deep. It's deliberately small.
+async derivation. Bolt is young, has no middleware, no devtools integration, and
+caps typed paths at 6 levels deep. It's deliberately small.
 
 ## Contributing
 
