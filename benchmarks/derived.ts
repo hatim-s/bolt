@@ -138,6 +138,56 @@ function registerReverseChain(size: number) {
   return durationMs;
 }
 
+function registerHighFanBridge(size: number) {
+  const inputs: Record<string, number> = {};
+  const producers: Record<string, number> = {};
+  const outputs: Record<string, number> = {};
+  const producerPaths: string[] = [];
+
+  for (let index = 0; index < size; index += 1) {
+    const key = `p${index}`;
+    inputs[key] = 0;
+    producers[key] = 0;
+    outputs[key] = 0;
+    producerPaths.push(`producers.${key}`);
+  }
+
+  const store = createBoltStore({ bridge: 0, inputs, outputs, producers });
+
+  for (let index = 0; index < size; index += 1) {
+    const key = `p${index}`;
+    store.deriveUnsafe(
+      `producers.${key}`,
+      [`inputs.${key}`],
+      ({ get }) => Number(get(`inputs.${key}`)),
+      { initialize: false },
+    );
+    store.deriveUnsafe(
+      `outputs.${key}`,
+      ["bridge"],
+      ({ get }) => Number(get("bridge")) + index,
+      { initialize: false },
+    );
+  }
+
+  const start = performance.now();
+  store.deriveUnsafe(
+    "bridge",
+    producerPaths,
+    ({ get }) => producerPaths.reduce((total, path) => total + Number(get(path)), 0),
+    { initialize: false },
+  );
+  const durationMs = performance.now() - start;
+
+  store.set("inputs.p0", 1);
+
+  if (store.get(`outputs.p${size - 1}`) !== size) {
+    throw new Error("high-fan bridge did not settle");
+  }
+
+  return durationMs;
+}
+
 function disposeIndependentAndReregister(size: number) {
   const initial: Record<string, number> = {};
 
@@ -213,6 +263,7 @@ const workloads = [
   ["chain-settlement", settleChain],
   ["wide-fanout-settlement", settleWideFanout],
   ["reverse-chain-registration", registerReverseChain],
+  ["high-fan-bridge-registration", registerHighFanBridge],
   ["independent-dispose-reregister", disposeIndependentAndReregister],
   ["short-chain-dispose-reregister", disposeShortChainAndReregister],
 ] as const;

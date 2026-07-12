@@ -95,6 +95,66 @@ describe("derived graph deterministic stress", () => {
     expect([...calls].every((count) => count === 1)).toBe(true);
   });
 
+  test("registers a high fan-in/high fan-out bridge with one reachability traversal", () => {
+    const bridgeSize = 2_048;
+    const inputs: Record<string, number> = {};
+    const producers: Record<string, number> = {};
+    const outputs: Record<string, number> = {};
+    const producerPaths: string[] = [];
+
+    for (let index = 0; index < bridgeSize; index += 1) {
+      const key = `p${index}`;
+      inputs[key] = 0;
+      producers[key] = 0;
+      outputs[key] = 0;
+      producerPaths.push(`producers.${key}`);
+    }
+
+    const store = createBoltStore({ bridge: 0, inputs, outputs, producers });
+    const producerCalls = new Uint8Array(bridgeSize);
+    const outputCalls = new Uint8Array(bridgeSize);
+    let bridgeCalls = 0;
+
+    for (let index = 0; index < bridgeSize; index += 1) {
+      const key = `p${index}`;
+      store.deriveUnsafe(
+        `producers.${key}`,
+        [`inputs.${key}`],
+        ({ get }) => {
+          producerCalls[index] += 1;
+          return Number(get(`inputs.${key}`));
+        },
+        { initialize: false },
+      );
+      store.deriveUnsafe(
+        `outputs.${key}`,
+        ["bridge"],
+        ({ get }) => {
+          outputCalls[index] += 1;
+          return Number(get("bridge")) + index;
+        },
+        { initialize: false },
+      );
+    }
+
+    store.deriveUnsafe(
+      "bridge",
+      producerPaths,
+      ({ get }) => {
+        bridgeCalls += 1;
+        return producerPaths.reduce((total, path) => total + Number(get(path)), 0);
+      },
+      { initialize: false },
+    );
+
+    store.set("inputs.p0", 1);
+
+    expect(producerCalls[0]).toBe(1);
+    expect(bridgeCalls).toBe(1);
+    expect([...outputCalls].every((count) => count === 1)).toBe(true);
+    expect(store.get(`outputs.p${bridgeSize - 1}`)).toBe(bridgeSize);
+  });
+
   test("tears down and re-registers bulk independent targets without stale edges", () => {
     const initial: Record<string, number> = {};
 

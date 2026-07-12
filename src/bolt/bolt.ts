@@ -620,17 +620,16 @@ function createInternalBoltStore<TState extends object>(
       return;
     }
 
-    for (const consumerId of topology.consumerIds) {
-      for (const producerId of topology.producerIds) {
-        const path = findDownstreamPath(consumerId, producerId);
+    const path = findDownstreamPath(
+      topology.consumerIds,
+      topology.producerIds,
+    );
 
-        if (path) {
-          const formattedPath = [node.id, ...path, node.id]
-            .map((id) => formatPathKey(derivedNodes.get(id)?.targetPathKey ?? `${id}`))
-            .join(" -> ");
-          throw new Error(`Bolt derived cycle: ${formattedPath}`);
-        }
-      }
+    if (path) {
+      const formattedPath = [node.id, ...path, node.id]
+        .map((id) => formatPathKey(derivedNodes.get(id)?.targetPathKey ?? `${id}`))
+        .join(" -> ");
+      throw new Error(`Bolt derived cycle: ${formattedPath}`);
     }
   }
 
@@ -766,14 +765,24 @@ function createInternalBoltStore<TState extends object>(
     upstreamIds.add(producerId);
   }
 
-  function findDownstreamPath(startId: number, targetId: number) {
-    const parents = new Map<number, number | undefined>([[startId, undefined]]);
-    const queue = [startId];
+  function findDownstreamPath(
+    startIds: ReadonlySet<number>,
+    targetIds: ReadonlySet<number>,
+  ) {
+    const parents = new Map<number, number | undefined>();
+    const queue: number[] = [];
+
+    for (const startId of startIds) {
+      if (!parents.has(startId)) {
+        parents.set(startId, undefined);
+        queue.push(startId);
+      }
+    }
 
     for (let index = 0; index < queue.length; index += 1) {
       const nodeId = queue[index];
 
-      if (nodeId === targetId) {
+      if (targetIds.has(nodeId)) {
         const path: number[] = [];
 
         for (let cursor: number | undefined = nodeId; cursor !== undefined; ) {
