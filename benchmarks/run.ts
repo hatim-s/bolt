@@ -1,8 +1,7 @@
-import { execFileSync } from "node:child_process";
 import { cpus, arch, platform, release } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import {
   immutableWorkloads,
   type CreateBoltStore,
@@ -193,10 +192,10 @@ Example:
 
 function gitValue(directory: string, args: string[]): string | null {
   try {
-    return execFileSync("git", ["-C", directory, ...args], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
+    const proc = Bun.spawnSync(["git", "-C", directory, ...args], {
+      stderr: "ignore",
+    });
+    return proc.success ? proc.stdout.toString().trim() : null;
   } catch {
     return null;
   }
@@ -380,7 +379,7 @@ async function main(): Promise<void> {
   if (options.jsonPath) {
     const outputPath = resolve(options.jsonPath);
     await mkdir(dirname(outputPath), { recursive: true });
-    await writeFile(outputPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
+    await Bun.write(outputPath, `${JSON.stringify(report, null, 2)}\n`);
     console.log(`JSON: ${outputPath}`);
   }
 }
