@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { createBoltStore } from "../src/bolt/bolt";
 
@@ -307,7 +307,7 @@ const jsonFlag = process.argv.indexOf("--json");
 if (jsonFlag >= 0) {
   const path = resolve(process.argv[jsonFlag + 1] ?? "artifacts/benchmarks/derived.json");
   await mkdir(dirname(path), { recursive: true });
-  await writeFile(
+  await Bun.write(
     path,
     `${JSON.stringify({ measuredPasses: MEASURED_PASSES, results, warmupPasses: WARMUP_PASSES }, null, 2)}\n`,
   );
